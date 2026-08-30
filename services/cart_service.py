@@ -18,6 +18,7 @@ from typing import Any
 
 import database
 from campus import get_campus
+from course_models import priority_group_key, time_signature
 from database import DatabaseManager
 
 # 全局数据库实例
@@ -58,6 +59,16 @@ def add_course(course: Any) -> dict[str, bool | str]:
     if not getattr(course, "course_number", ""):
         with suppress(AttributeError):
             course.course_number = str(getattr(course, "id", ""))
+    if not getattr(course, "time_signature", ""):
+        with suppress(AttributeError):
+            course.time_signature = time_signature(getattr(course, "teaching_place", ""))
+    if not getattr(course, "priority_group", ""):
+        with suppress(AttributeError):
+            course.priority_group = priority_group_key(
+                course_number=getattr(course, "course_number", ""),
+                schedule_signature=getattr(course, "time_signature", ""),
+                course_id=getattr(course, "id", ""),
+            )
 
     if db.add_course(course):
         return {"success": True, "message": "成功加入购物车"}
@@ -106,6 +117,11 @@ def get_active_courses() -> list[dict]:
 def update_course_preferences(course_id: str, **fields) -> bool:
     """Update safe, user-controlled queue preferences for one course."""
     return db.update_course_preferences(str(course_id or "").strip(), **fields)
+
+
+def update_course_priorities(updates: list[tuple[str, int]]) -> bool:
+    """Atomically update the order of several local queue rows."""
+    return db.update_course_priorities(updates)
 
 
 def update_status(course_id: str, status: str) -> bool:

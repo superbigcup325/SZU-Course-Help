@@ -24,7 +24,6 @@ WEBVPN_COOKIE_NAMES = (
     "webvpn_username",
     "webvpn_username_NS_Sig",
 )
-SCHOOL_COOKIE_NAMES = ("route", "insert_cookie", "JSESSIONID", "_WEU")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,12 +65,6 @@ BACKENDS: dict[str, BackendProfile] = {
     ),
 }
 
-PROXY_HOSTS = {
-    PRIMARY_HOST: config.BACKEND_PRIMARY,
-    WEBVPN_HOST: config.BACKEND_WEBVPN,
-    WEBVPN_ROOT_HOST: config.BACKEND_WEBVPN,
-}
-AUTH_PROXY_HOSTS = {AUTHSERVER_HOST}
 TRANSIENT_STATUS_CODES = frozenset({502, 503, 504})
 PRIMARY_COOLDOWN_SECONDS = 5 * 60
 _primary_cooldown_until = 0.0
@@ -102,12 +95,17 @@ def get_profile(key: str) -> BackendProfile:
     return BACKENDS[normalize_preference(key)]
 
 
-def candidate_profiles(preference: str | None = None) -> list[BackendProfile]:
+def candidate_profiles(
+    preference: str | None = None, *, allow_failover: bool = False
+) -> list[BackendProfile]:
+    """Return eligible profiles without ever dropping the only usable primary."""
     normalized = normalize_preference(preference or get_preference())
     if normalized == config.BACKEND_AUTO:
-        if primary_cooldown_active():
-            return [BACKENDS[config.BACKEND_WEBVPN]]
-        return [BACKENDS[config.BACKEND_PRIMARY], BACKENDS[config.BACKEND_WEBVPN]]
+        primary = BACKENDS[config.BACKEND_PRIMARY]
+        if not allow_failover or not has_webvpn_cookies():
+            return [primary]
+        webvpn = BACKENDS[config.BACKEND_WEBVPN]
+        return [webvpn, primary] if primary_cooldown_active() else [primary, webvpn]
     return [BACKENDS[normalized]]
 
 
@@ -207,7 +205,7 @@ def mark_success(profile: BackendProfile) -> None:
 
 
 def mark_failure(profile: BackendProfile) -> None:
-    if profile.key == config.BACKEND_PRIMARY:
+    if profile.key == config.BACKEND_PRIMARY and has_webvpn_cookies():
         mark_primary_failure()
 
 
@@ -230,9 +228,15 @@ def request_with_failover(
     referer: str | None = None,
     extra_headers: dict[str, str] | None = None,
     preference: str | None = None,
+    read_only: bool = False,
 ) -> Any:
-    """Send one school request and fail over only on transport/gateway errors."""
-    profiles = candidate_profiles(preference)
+    """Send one request; cross-backend retry is opt-in and read-only only.
+
+    School query endpoints sometimes use HTTP POST, so safety is expressed by
+    the caller's ``read_only`` contract rather than by the verb alone. Mutating
+    enrollment and withdrawal callers never set this flag.
+    """
+    profiles = candidate_profiles(preference, allow_failover=read_only)
     last_error: Exception | None = None
     normalized_path = str(path).lstrip("/")
     for index, profile in enumerate(profiles):
@@ -258,18 +262,20 @@ def request_with_failover(
         except requests.RequestException as exc:
             last_error = exc
             mark_failure(profile)
-            if index + 1 < len(profiles):
+            if read_only and index + 1 < len(profiles):
                 logger.warning("Backend %s unavailable; trying fallback", profile.label)
                 continue
             raise
-        if should_fail_over(response):
+        transient_failure = should_fail_over(response)
+        if transient_failure:
             mark_failure(profile)
-        if should_fail_over(response) and index + 1 < len(profiles):
+        if read_only and transient_failure and index + 1 < len(profiles):
             logger.warning(
                 "Backend %s returned %s; trying fallback", profile.label, response.status_code
             )
             continue
-        mark_success(profile)
+        if not transient_failure:
+            mark_success(profile)
         return response
     if last_error:
         raise last_error
@@ -407,7 +413,6 @@ __all__ = [
     "BackendProfile",
     "WebVPNAuthenticationRequiredError",
     "PRIMARY_HOST",
-    "PROXY_HOSTS",
     "TRANSIENT_STATUS_CODES",
     "WEBVPN_COOKIE_NAMES",
     "WEBVPN_HOST",

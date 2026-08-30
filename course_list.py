@@ -14,6 +14,7 @@ import requests
 import config
 from campus import DEFAULT_CAMPUS_CODE, normalize_campus_code
 from course_models import CoursesResponse
+from services import backend_service
 
 REQUEST_TIMEOUT = (5, 20)
 
@@ -25,6 +26,22 @@ class CourseQueryFailure:
     text: str
     status_code: int
     error: Exception
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogRequestContext:
+    """Immutable school-session fields used by a background catalog read."""
+
+    student_id: str
+    campus_code: str
+    batch_code: str
+    token: str
+    cookie: str
+    backend_preference: str = config.BACKEND_AUTO
+
+    def __post_init__(self) -> None:
+        if not all((self.student_id, self.campus_code, self.batch_code, self.token, self.cookie)):
+            raise ValueError("complete catalog request context is required")
 
 
 def get_headers() -> dict[str, str]:
@@ -51,17 +68,26 @@ def _query_courses(
     teaching_class_type: str,
     page: int,
     endpoint: str = "elective/programCourse.do",
+    context: CatalogRequestContext | None = None,
 ) -> CoursesResponse | CourseQueryFailure:
     """Query one zero-based page without changing the school request contract."""
+    context = context or CatalogRequestContext(
+        student_id=str(config.student_id),
+        campus_code=str(getattr(config, "campus_code", DEFAULT_CAMPUS_CODE)),
+        batch_code=str(config.elective_batch_code),
+        token=str(config.token),
+        cookie=str(config.combined_cookie),
+        backend_preference=backend_service.get_preference(),
+    )
     campus_code = normalize_campus_code(
-        getattr(config, "campus_code", DEFAULT_CAMPUS_CODE),
+        context.campus_code,
         fallback=DEFAULT_CAMPUS_CODE,
     )
     query_setting = {
         "data": {
-            "studentCode": config.student_id,
+            "studentCode": context.student_id,
             "campus": campus_code,
-            "electiveBatchCode": config.elective_batch_code,
+            "electiveBatchCode": context.batch_code,
             "isMajor": "1",
             "teachingClassType": teaching_class_type,
             "checkConflict": "2",
@@ -73,9 +99,19 @@ def _query_courses(
         "order": "",
         "orderBy": "courseNumber",
     }
-    response = requests.post(
-        config.SCHOOL_BASE_URL + endpoint,
-        headers=get_headers(),
+
+    def sender(**kwargs):
+        kwargs.pop("method", None)
+        return requests.post(**kwargs)
+
+    response = backend_service.request_with_failover(
+        "POST",
+        endpoint,
+        sender=sender,
+        token=context.token,
+        content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        accept="application/json, text/javascript, */*; q=0.01",
+        cookie=context.cookie,
         data={
             "querySetting": json.dumps(
                 query_setting,
@@ -84,6 +120,8 @@ def _query_courses(
             )
         },
         timeout=REQUEST_TIMEOUT,
+        read_only=True,
+        preference=context.backend_preference,
     )
     try:
         return CoursesResponse.from_response(response)
@@ -126,8 +164,31 @@ def mooc_course(page: int) -> CoursesResponse | CourseQueryFailure:
     return _query_courses("MOOC", page)
 
 
+def query_course_page(
+    course_type: str,
+    page: int,
+    context: CatalogRequestContext,
+) -> CoursesResponse | CourseQueryFailure:
+    """Query one category with a captured context instead of mutable globals."""
+    normalized = str(course_type or "").strip().upper()
+    endpoints = {
+        "TJKC": ("TJKC", "elective/recommendedCourse.do"),
+        "FANKC": ("FANKC", "elective/programCourse.do"),
+        "FAWKC": ("FAWKC", "elective/programCourse.do"),
+        "XGXK": ("XGXK", "elective/programCourse.do"),
+        "TYKC": ("TYKC", "elective/programCourse.do"),
+        "MOOC": ("MOOC", "elective/programCourse.do"),
+        "FXKC": ("FXKC", "elective/programCourse.do"),
+    }
+    if normalized not in endpoints:
+        raise ValueError(f"unsupported course type: {normalized}")
+    teaching_class_type, endpoint = endpoints[normalized]
+    return _query_courses(teaching_class_type, page, endpoint, context)
+
+
 __all__ = [
     "CourseQueryFailure",
+    "CatalogRequestContext",
     "REQUEST_TIMEOUT",
     "minor_course",
     "mooc_course",
@@ -135,5 +196,6 @@ __all__ = [
     "programmed_course",
     "public_course",
     "recommended_course",
+    "query_course_page",
     "sport_course",
 ]

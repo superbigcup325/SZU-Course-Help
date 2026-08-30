@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+import requests
+
+import choose_course
+import config
+import logic
+from services import backend_service
+
+
+@pytest.fixture(autouse=True)
+def reset_backend_state(monkeypatch):
+    backend_service.clear_primary_cooldown()
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_AUTO)
+    monkeypatch.setattr(config, "active_backend", config.BACKEND_PRIMARY)
+    monkeypatch.setattr(config, "combined_cookie", "route=school")
+    monkeypatch.setattr(config, "webvpn_cookie", "")
+    yield
+    backend_service.clear_primary_cooldown()
+
+
+def _authenticate_webvpn(monkeypatch):
+    monkeypatch.setattr(
+        config,
+        "webvpn_cookie",
+        "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
+    )
+
+
+def test_auto_mode_never_drops_the_only_usable_primary_backend(monkeypatch):
+    backend_service.mark_primary_failure()
+
+    profiles = backend_service.candidate_profiles(allow_failover=True)
+
+    assert [profile.key for profile in profiles] == [config.BACKEND_PRIMARY]
+
+
+def test_authenticated_read_only_request_can_fail_over(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs["url"])
+        status_code = 503 if "bkxk.szu.edu.cn" in kwargs["url"] else 200
+        return SimpleNamespace(status_code=status_code)
+
+    response = backend_service.request_with_failover(
+        "POST",
+        "elective/programCourse.do",
+        sender=sender,
+        read_only=True,
+    )
+
+    assert response.status_code == 200
+    assert calls[0].startswith("http://bkxk.szu.edu.cn/")
+    assert calls[1].startswith("https://bkxk.webvpn.szu.edu.cn/")
+    assert config.active_backend == config.BACKEND_WEBVPN
+
+
+def test_mutating_request_never_crosses_backends_after_network_failure(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs["url"])
+        raise requests.ConnectionError("primary unavailable")
+
+    with pytest.raises(requests.ConnectionError):
+        backend_service.request_with_failover(
+            "POST",
+            "elective/volunteer.do",
+            sender=sender,
+            read_only=False,
+        )
+
+    assert len(calls) == 1
+    assert calls[0].startswith("http://bkxk.szu.edu.cn/")
+
+
+def test_mutating_transient_response_is_returned_without_retry_or_false_success(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs["url"])
+        return SimpleNamespace(status_code=503)
+
+    response = backend_service.request_with_failover(
+        "POST",
+        "elective/deleteVolunteer.do",
+        sender=sender,
+        read_only=False,
+    )
+
+    assert response.status_code == 503
+    assert len(calls) == 1
+    assert backend_service.primary_cooldown_active() is True
+
+
+def test_explicit_webvpn_requires_authenticated_gateway_cookie():
+    with pytest.raises(backend_service.WebVPNAuthenticationRequiredError):
+        backend_service.request_with_failover(
+            "GET",
+            "elective/status.do",
+            sender=lambda **kwargs: SimpleNamespace(status_code=200),
+            preference=config.BACKEND_WEBVPN,
+            read_only=True,
+        )
+
+
+def test_enrollment_stays_on_primary_after_read_only_webvpn_fallback(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "active_backend", config.BACKEND_WEBVPN)
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "elective_batch_code", "batch")
+    monkeypatch.setattr(config, "token", "token")
+    calls = []
+
+    def sender(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(choose_course.requests, "post", sender)
+
+    choose_course.submit_course_selection("class-id", "FANKC", "01")
+
+    assert len(calls) == 1
+    assert calls[0]["url"].startswith("http://bkxk.szu.edu.cn/")
+    assert "_webvpn_key" not in calls[0]["headers"]["Cookie"]
+
+
+def test_school_login_stays_on_primary_and_excludes_webvpn_cookie(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    monkeypatch.setattr(config, "active_backend", config.BACKEND_WEBVPN)
+    monkeypatch.setattr(config, "backend_preference", config.BACKEND_WEBVPN)
+    captured = {}
+
+    class Response:
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"code": "0", "msg": "preview failure"}
+
+    def request_with_failover(*_args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
+
+    result = logic.login("2024110122", "vtoken", "encrypted", "1-2,3-4,5-6,7-8", "route=captcha")
+
+    assert result["success"] is False
+    assert captured["preference"] == config.BACKEND_PRIMARY
+    assert "_webvpn_key" not in captured["cookie"]
+
+
+def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
+    captured = {}
+
+    class Response:
+        text = '{"data":{"token":"vtoken"}}'
+
+        @staticmethod
+        def json():
+            return {"data": {"token": "vtoken"}}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    def request_with_failover(*_args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
+
+    assert logic.get_vtoken() == "vtoken"
+    assert captured["read_only"] is True
+    assert captured["preference"] == config.BACKEND_PRIMARY

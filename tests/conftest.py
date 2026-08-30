@@ -20,11 +20,6 @@ def block_unmocked_network(monkeypatch):
 
     monkeypatch.setattr(requests.sessions.Session, "request", blocked_request)
 
-    # The reverse proxy talks to the school over httpx; the starlette.testclient
-    # also uses httpx internally. Removing the httpx block here lets the
-    # TestClient tests continue to run (the deprecation warning was pre-existing).
-    # The proxy tests use a mock client and never reach real network.
-
 
 @pytest.fixture(autouse=True)
 def isolate_course_cache(monkeypatch, tmp_path):

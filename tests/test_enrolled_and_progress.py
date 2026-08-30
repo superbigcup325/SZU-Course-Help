@@ -125,9 +125,6 @@ def test_mode_endpoint_returns_complete_settings_snapshot(monkeypatch):
     monkeypatch.setitem(enroll_service._settings, "boost_interval_ms", 1200)
     monkeypatch.setitem(enroll_service._settings, "normal_interval_ms", 12300)
     monkeypatch.setitem(enroll_service._settings, "scan_interval_ms", 65000)
-    monkeypatch.setitem(enroll_service._settings, "switch_enabled", True)
-    monkeypatch.setitem(enroll_service._settings, "switch_confirmed", True)
-    monkeypatch.setitem(enroll_service._settings, "switch_threshold", 7)
 
     response = client.post("/api/enroll/mode", json={"mode": "normal"})
 
@@ -138,9 +135,6 @@ def test_mode_endpoint_returns_complete_settings_snapshot(monkeypatch):
         "boost_interval_ms": 1200,
         "normal_interval_ms": 12300,
         "scan_interval_ms": 65000,
-        "switch_enabled": True,
-        "switch_confirmed": True,
-        "switch_threshold": 7,
         "mode": "normal",
     }
     enroll_service._release_enroll_task()
@@ -158,7 +152,7 @@ def test_success_marks_course_and_stops_requesting_it(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: calls.append(cid) or Resp("添加选课志愿成功"),
+        lambda cid, ctype, campus: calls.append(cid) or Resp("添加选课志愿成功"),
     )
     assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
     assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == "ok1"
@@ -173,7 +167,7 @@ def test_terminal_error_marks_failed_and_stops(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: calls.append(cid) or Resp("上课时间冲突", code="0"),
+        lambda cid, ctype, campus: calls.append(cid) or Resp("上课时间冲突", code="0"),
     )
     assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
     assert db.get_courses_by_status(database.STATUS_FAILED)[0]["id"] == "bad1"
@@ -187,7 +181,7 @@ def test_capacity_full_keeps_retrying(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: calls.append(cid) or Resp("该课程超过课容量", code="0"),
+        lambda cid, ctype, campus: calls.append(cid) or Resp("该课程超过课容量", code="0"),
     )
     monkeypatch.setattr(config, "count", 25)
     assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
@@ -245,7 +239,7 @@ def test_session_expired_returns_false_for_relogin(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: Resp("login required", code="302", status=401),
+        lambda cid, ctype, campus: Resp("login required", code="302", status=401),
     )
     assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.SESSION_EXPIRED
 
@@ -256,7 +250,7 @@ def test_http_200_login_page_triggers_relogin(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: Resp(
+        lambda cid, ctype, campus: Resp(
             '<form action="student/check/login.do"><input name="vtoken">'
             '<input name="loginPwd"></form>',
             code="0",
@@ -274,7 +268,7 @@ def test_unknown_response_does_not_starve_other_courses(tmp_path, monkeypatch):
     db = _prime_cart(monkeypatch, tmp_path, [a, b])
     monkeypatch.setattr(config, "count", 1)  # 单轮
 
-    def fake(cid, ctype):
+    def fake(cid, ctype, campus):
         if cid == "A":
             return Resp("系统繁忙，请稍后再试", code="0")
         return Resp("添加选课志愿成功")
@@ -291,7 +285,7 @@ def test_multi_course_one_succeeds_other_continues(tmp_path, monkeypatch):
     db = _prime_cart(monkeypatch, tmp_path, [a, b])
     calls = []
 
-    def fake(cid, ctype):
+    def fake(cid, ctype, campus):
         calls.append(cid)
         if cid == "A":
             return Resp("添加选课志愿成功")
@@ -654,7 +648,7 @@ def test_progress_snapshot_reports_success_and_event(tmp_path, monkeypatch):
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda cid, ctype: Resp("添加选课志愿成功"),
+        lambda cid, ctype, campus: Resp("添加选课志愿成功"),
     )
 
     enroll_service._reset_progress([course])

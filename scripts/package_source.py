@@ -1,4 +1,4 @@
-"""Create a clean source archive from Git-tracked and intentional new files."""
+"""Create a clean source archive from files tracked by Git."""
 
 from __future__ import annotations
 
@@ -17,15 +17,19 @@ def project_version() -> str:
         return str(tomllib.load(handle)["project"]["version"])
 
 
-def source_files() -> list[Path]:
+def source_files(root: Path = ROOT) -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-        cwd=ROOT,
+        ["git", "ls-files", "-z", "--cached"],
+        cwd=root,
         check=True,
         capture_output=True,
     )
-    paths = [ROOT / item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
-    return sorted(path for path in paths if path.is_file())
+    paths = [root / item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
+    invalid = [path for path in paths if not path.is_file() or path.is_symlink()]
+    if invalid:
+        names = ", ".join(str(path.relative_to(root)) for path in invalid)
+        raise RuntimeError(f"Tracked source entries are missing or unsafe: {names}")
+    return sorted(paths)
 
 
 def main() -> None:

@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+import os
+
+import pytest
+
 from services import webvpn_auth_service
 
 
@@ -36,13 +42,40 @@ def test_extract_webvpn_cookie_header_requires_all_three_cookies():
     )
 
 
-def test_controlled_browser_profile_is_persistent(monkeypatch, tmp_path):
-    manager = webvpn_auth_service.ControlledBrowserManager()
-    profile = tmp_path / "webvpn-browser-profile"
-    monkeypatch.setattr(webvpn_auth_service, "data_dir", lambda: tmp_path)
-    monkeypatch.setattr(webvpn_auth_service, "find_browser", lambda: "/usr/bin/chromium")
-    monkeypatch.setattr(webvpn_auth_service, "_free_local_port", lambda: 43123)
-    monkeypatch.setattr(webvpn_auth_service, "_read_http_json", lambda *args, **kwargs: {})
+def test_known_browser_paths_cover_macos_and_windows_install_locations():
+    macos = webvpn_auth_service._known_browser_paths("darwin", {})
+    windows = webvpn_auth_service._known_browser_paths(
+        "win32",
+        {"PROGRAMFILES": "C:/Program Files", "LOCALAPPDATA": "C:/Users/test/AppData/Local"},
+    )
+
+    assert any("Google Chrome.app" in path for path in macos)
+    assert "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" in windows
+    assert any("Microsoft\\Edge\\Application\\msedge.exe" in path for path in windows)
+
+
+def test_find_browser_uses_known_absolute_path_when_not_on_path(monkeypatch, tmp_path):
+    executable = tmp_path / "chrome"
+    executable.write_text("browser", encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.delenv("COURSE_SELECT_BROWSER", raising=False)
+    monkeypatch.setattr(webvpn_auth_service.shutil, "which", lambda _candidate: None)
+    monkeypatch.setattr(
+        webvpn_auth_service,
+        "_known_browser_paths",
+        lambda: (str(executable),),
+    )
+
+    assert webvpn_auth_service.find_browser() == str(executable)
+
+
+def _prepare_fake_browser(monkeypatch, tmp_path):
+    profile = tmp_path / "ephemeral-webvpn-profile"
+
+    def fake_mkdtemp(*, prefix):
+        assert prefix == "szu-course-webvpn-"
+        profile.mkdir()
+        return str(profile)
 
     class FakeProcess:
         def __init__(self):
@@ -57,96 +90,47 @@ def test_controlled_browser_profile_is_persistent(monkeypatch, tmp_path):
         def wait(self, timeout):
             return None
 
-    monkeypatch.setattr(
-        webvpn_auth_service.subprocess, "Popen", lambda *args, **kwargs: FakeProcess()
-    )
-    monkeypatch.setattr(webvpn_auth_service, "_open_devtools_page", lambda *args, **kwargs: {})
-    monkeypatch.setattr(manager, "_inject_cookies_and_navigate", lambda url: None)
+        def kill(self):
+            self.dead = True
+
+    process = FakeProcess()
+    monkeypatch.setattr(webvpn_auth_service.tempfile, "mkdtemp", fake_mkdtemp)
+    monkeypatch.setattr(webvpn_auth_service, "find_browser", lambda: "/usr/bin/chromium")
+    monkeypatch.setattr(webvpn_auth_service, "_free_local_port", lambda: 43123)
+    monkeypatch.setattr(webvpn_auth_service.subprocess, "Popen", lambda *args, **kwargs: process)
     monkeypatch.setattr(webvpn_auth_service.backend_service, "has_webvpn_cookies", lambda: False)
+    return profile, process
+
+
+def test_controlled_browser_profile_is_ephemeral(monkeypatch, tmp_path):
+    manager = webvpn_auth_service.ControlledBrowserManager()
+    profile, process = _prepare_fake_browser(monkeypatch, tmp_path)
+    monkeypatch.setattr(manager, "_start_watcher", lambda: None)
 
     status = manager.start()
-    assert status["state"] in {"starting", "pending"}
+
+    assert status["state"] == "starting"
     assert profile.is_dir()
+    args = manager._browser_args("/usr/bin/chromium", "https://example.invalid")
+    assert f"--user-data-dir={profile}" in args
+    assert "--disable-background-mode" in args
     manager.stop_browser()
-    assert profile.is_dir()
+    assert process.dead is True
+    assert not profile.exists()
 
 
-def test_saved_cookies_are_injected_before_webvpn_navigation(monkeypatch):
-    monkeypatch.setattr(
-        webvpn_auth_service.config,
-        "combined_cookie",
-        "route=route; insert_cookie=insert; JSESSIONID=session; _WEU=weu",
-    )
-    monkeypatch.setattr(
-        webvpn_auth_service.config,
-        "webvpn_cookie",
-        "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig",
-    )
-    commands = []
-    injected = []
+def test_browser_launch_failure_erases_ephemeral_profile(monkeypatch, tmp_path):
     manager = webvpn_auth_service.ControlledBrowserManager()
+    profile, _process = _prepare_fake_browser(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        webvpn_auth_service,
-        "_read_http_json",
-        lambda *args, **kwargs: [
-            {"type": "page", "webSocketDebuggerUrl": "ws://127.0.0.1:1/devtools"}
-        ],
+        webvpn_auth_service.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("launch failed")),
     )
 
-    def fake_cdp(ws, method, params=None):
-        commands.append((method, params))
-        if method == "Network.setCookies":
-            injected.extend(params["cookies"])
-        if method == "Network.getAllCookies":
-            return {
-                "cookies": [
-                    {"name": cookie["name"], "value": cookie["value"], "domain": cookie["domain"]}
-                    for cookie in injected
-                ]
-            }
-        return {}
+    with pytest.raises(webvpn_auth_service.ControlledBrowserUnavailableError):
+        manager.start()
 
-    monkeypatch.setattr(webvpn_auth_service, "_cdp_command", fake_cdp)
-    manager._debug_port = 12345
-    manager._inject_cookies_and_navigate("https://bkxk.webvpn.szu.edu.cn")
-
-    assert commands[0][0] == "Network.setCookies"
-    assert all("domain" in cookie for cookie in commands[0][1]["cookies"])
-    domains = {cookie["name"]: cookie["domain"] for cookie in commands[0][1]["cookies"]}
-    assert domains["route"] == "bkxk.webvpn.szu.edu.cn"
-    assert domains["JSESSIONID"] == "bkxk.webvpn.szu.edu.cn"
-    assert domains["_webvpn_key"] == ".webvpn.szu.edu.cn"
-    cookies = {cookie["name"]: cookie for cookie in commands[0][1]["cookies"]}
-    assert cookies["_WEU"]["path"] == "/xsxkapp/"
-    assert cookies["_WEU"]["sameSite"] == "None"
-    assert cookies["route"]["path"] == "/"
-    assert cookies["route"]["sameSite"] == "Lax"
-    assert {cookie["name"] for cookie in commands[0][1]["cookies"]} == {
-        "route",
-        "insert_cookie",
-        "JSESSIONID",
-        "_WEU",
-        "_webvpn_key",
-        "webvpn_username",
-        "webvpn_username_NS_Sig",
-    }
-    assert commands[1][0] == "Network.getAllCookies"
-    assert commands[2] == ("Page.navigate", {"url": "https://bkxk.webvpn.szu.edu.cn"})
-
-
-def test_saved_browser_cookies_include_unknown_school_cookie(monkeypatch):
-    monkeypatch.setattr(webvpn_auth_service.config, "combined_cookie", "extra_school=1")
-    monkeypatch.setattr(webvpn_auth_service.config, "webvpn_cookie", "")
-
-    cookies = webvpn_auth_service.ControlledBrowserManager._saved_browser_cookies()
-
-    assert cookies == [
-        {
-            "name": "extra_school",
-            "value": "1",
-            "domain": "bkxk.webvpn.szu.edu.cn",
-            "path": "/",
-            "sameSite": "Lax",
-            "secure": True,
-        }
-    ]
+    assert not profile.exists()
+    assert manager.status()["state"] == "error"
+    assert os.path.basename(str(profile)) not in manager.status()["message"]

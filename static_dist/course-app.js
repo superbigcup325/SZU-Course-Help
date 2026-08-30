@@ -2,7 +2,6 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const SESSION_RECOVERY_TIMEOUT_MS = 180000;
-const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
 const FILTER_PAGE_SIZE = 10;
 const MAX_CATALOG_PAGES = 1000;
 const CATALOG_PAGE_DELAY_MS = 150;
@@ -79,9 +78,6 @@ const appState = {
     boostIntervalMs: 1000,
     normalIntervalMs: 10000,
     scanIntervalMs: 60000,
-    swapEnabled: false,
-    swapConfirmed: false,
-    swapThreshold: 5,
   },
   myCoursesView: "grid",
   showCartOnSchedule: true,
@@ -171,9 +167,6 @@ const appElements = {
   boostInterval: document.querySelector("#boostInterval"),
   normalInterval: document.querySelector("#normalInterval"),
   scanInterval: document.querySelector("#scanInterval"),
-  swapCourseSwitch: document.querySelector("#swapCourseSwitch"),
-  swapRiskConfirm: document.querySelector("#swapRiskConfirm"),
-  swapThreshold: document.querySelector("#swapThreshold"),
 };
 
 class ApiError extends Error {
@@ -325,9 +318,6 @@ function settingPayload() {
     boost_interval_ms: intervalSecondsToMilliseconds(appElements.boostInterval?.value, appState.enroll.boostIntervalMs),
     normal_interval_ms: intervalSecondsToMilliseconds(appElements.normalInterval?.value, appState.enroll.normalIntervalMs),
     scan_interval_ms: intervalSecondsToMilliseconds(appElements.scanInterval?.value, appState.enroll.scanIntervalMs),
-    switch_enabled: Boolean(appElements.swapCourseSwitch?.checked),
-    switch_confirmed: Boolean(appElements.swapRiskConfirm?.checked),
-    switch_threshold: numericValue(appElements.swapThreshold?.value, appState.enroll.swapThreshold),
   };
 }
 
@@ -340,15 +330,9 @@ function applyEnrollSettings(data = {}) {
   appState.enroll.boostIntervalMs = numericValue(source.boost_interval_ms, appState.enroll.boostIntervalMs);
   appState.enroll.normalIntervalMs = numericValue(source.normal_interval_ms, appState.enroll.normalIntervalMs);
   appState.enroll.scanIntervalMs = numericValue(source.scan_interval_ms, appState.enroll.scanIntervalMs);
-  appState.enroll.swapEnabled = Boolean(source.switch_enabled ?? source.swap_enabled ?? appState.enroll.swapEnabled);
-  appState.enroll.swapConfirmed = Boolean(source.switch_confirmed ?? source.swap_confirmed ?? appState.enroll.swapConfirmed);
-  appState.enroll.swapThreshold = numericValue(source.switch_threshold ?? source.swap_threshold, appState.enroll.swapThreshold);
   if (appElements.boostInterval) appElements.boostInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.boostIntervalMs, 1000));
   if (appElements.normalInterval) appElements.normalInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.normalIntervalMs, 10000));
   if (appElements.scanInterval) appElements.scanInterval.value = String(Math.max(1, intervalMillisecondsToSeconds(appState.enroll.scanIntervalMs, 60000)));
-  if (appElements.swapCourseSwitch) appElements.swapCourseSwitch.checked = appState.enroll.swapEnabled;
-  if (appElements.swapRiskConfirm) appElements.swapRiskConfirm.checked = appState.enroll.swapConfirmed;
-  if (appElements.swapThreshold) appElements.swapThreshold.value = String(appState.enroll.swapThreshold);
   renderEnrollControls();
 }
 
@@ -403,9 +387,6 @@ async function updateEnrollMode(mode) {
     boostIntervalMs: appState.enroll.boostIntervalMs,
     normalIntervalMs: appState.enroll.normalIntervalMs,
     scanIntervalMs: appState.enroll.scanIntervalMs,
-    swapEnabled: appState.enroll.swapEnabled,
-    swapConfirmed: appState.enroll.swapConfirmed,
-    swapThreshold: appState.enroll.swapThreshold,
   };
   appState.enroll.mode = mode;
   renderEnrollControls();
@@ -423,9 +404,6 @@ async function updateEnrollMode(mode) {
       boost_interval_ms: data.settings?.boost_interval_ms ?? previousSettings.boostIntervalMs,
       normal_interval_ms: data.settings?.normal_interval_ms ?? previousSettings.normalIntervalMs,
       scan_interval_ms: data.settings?.scan_interval_ms ?? previousSettings.scanIntervalMs,
-      switch_enabled: data.settings?.switch_enabled ?? previousSettings.swapEnabled,
-      switch_confirmed: data.settings?.switch_confirmed ?? previousSettings.swapConfirmed,
-      switch_threshold: data.settings?.switch_threshold ?? previousSettings.swapThreshold,
     });
     showToast(`已切换为${enrollModeNames[mode]}`, false, true);
   } catch (error) {
@@ -735,56 +713,6 @@ function showSessionDialog(message) {
   if (!appElements.sessionDialog.open) appElements.sessionDialog.showModal();
 }
 
-async function loadBrowserRecoveryCredentials() {
-  try {
-    const raw = window.sessionStorage?.getItem(SESSION_CREDENTIALS_STORAGE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    const studentId = typeof data?.student_id === "string" ? data.student_id : "";
-    const blob = typeof data?.blob === "string" ? data.blob : "";
-    const backend = ["auto", "primary", "webvpn"].includes(data?.backend)
-      ? data.backend
-      : "auto";
-    if (!studentId || !blob || !window.crypto?.subtle) return null;
-    const [ivPart, dataPart] = blob.split(".");
-    if (!ivPart || !dataPart) return null;
-    const decode = (value) => {
-      const binary = window.atob(value);
-      const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      return bytes;
-    };
-    const encoder = new TextEncoder();
-    const baseKey = await window.crypto.subtle.importKey(
-      "raw",
-      encoder.encode(`${window.location.origin}|${studentId}`),
-      { name: "PBKDF2" },
-      false,
-      ["deriveKey"],
-    );
-    const key = await window.crypto.subtle.deriveKey(
-      {
-        name: "PBKDF2",
-        salt: encoder.encode("szu-course-help/salt-v1"),
-        iterations: 100000,
-        hash: "SHA-256",
-      },
-      baseKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["decrypt"],
-    );
-    const plain = await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: decode(ivPart) },
-      key,
-      decode(dataPart),
-    );
-    return { student_id: studentId, password: new TextDecoder().decode(plain), backend };
-  } catch {
-    return null;
-  }
-}
-
 function hideSessionDialog() {
   if (appElements.sessionDialog.open) appElements.sessionDialog.close();
 }
@@ -1042,7 +970,6 @@ function applySessionData(session) {
 
 async function requestAutomaticRelogin(options = {}) {
   const automatic = Boolean(options?.automatic);
-  const suppliedCredentials = options?.credentials || null;
   if (!appState.session || appState.session.logged_in || appState.session.relogin_in_progress) return;
   if (appState.reloginRequestPending) return;
   if (!automatic && appElements.studentLabel.disabled) return;
@@ -1051,17 +978,8 @@ async function requestAutomaticRelogin(options = {}) {
   appElements.studentLabel.classList.remove("is-actionable");
   appElements.studentLabel.textContent = "正在恢复登录";
   try {
-    const credentials = suppliedCredentials || await loadBrowserRecoveryCredentials();
-    if (!credentials) {
-      if (automatic) return;
-      throw new ApiError("当前浏览器会话没有可用的自动登录凭据，请返回登录页重新登录", {
-        code: "BROWSER_CREDENTIALS_UNAVAILABLE",
-        retryable: false,
-      });
-    }
     const session = await api("/api/session/recover", {
       method: "POST",
-      body: JSON.stringify(credentials),
       timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
     });
     applySessionData(session);
@@ -1082,9 +1000,8 @@ async function maybeStartAutomaticRelogin() {
   if (Number(session.relogin_failure_count || 0) >= Number(session.relogin_max_retries || 5)) return;
   if (appState.reloginRequestPending) return;
 
-  const credentials = await loadBrowserRecoveryCredentials();
-  if (!credentials || appState.session !== session) return;
-  void requestAutomaticRelogin({ automatic: true, credentials });
+  if (!session.automatic_relogin_available || appState.session !== session) return;
+  void requestAutomaticRelogin({ automatic: true });
 }
 
 function cartEditStateKey() {
@@ -1097,8 +1014,19 @@ function cartEditStateKey() {
   ].join(":");
 }
 
+function canMutateQueue() {
+  const session = appState.session;
+  if (!session?.task_running) return true;
+  return Boolean(
+    session.task_paused
+    && session.task_pause_acknowledged
+    && !session.task_stopping
+  );
+}
+
 function applyProgressTaskState(data) {
   const previousCartEditState = cartEditStateKey();
+  const previousQueueRevision = Number(appState.session?.task_queue_revision || 0);
   appState.progress = data;
   if (appState.session && data) {
     appState.session.task_running = Boolean(data.running);
@@ -1108,8 +1036,14 @@ function applyProgressTaskState(data) {
     appState.session.task_pause_source = data.pause_source || "";
     appState.session.task_stopping = Boolean(data.stopping);
     appState.session.task_stopping_reason = data.stopping_reason || "";
+    appState.session.task_queue_revision = Number(
+      data.queue_revision ?? previousQueueRevision,
+    );
   }
-  return previousCartEditState !== cartEditStateKey();
+  return {
+    controlsChanged: previousCartEditState !== cartEditStateKey(),
+    queueChanged: Number(appState.session?.task_queue_revision || 0) !== previousQueueRevision,
+  };
 }
 
 function updateTaskIndicator() {
@@ -1237,14 +1171,26 @@ function appendClassRow(container, course, classInfo) {
   }
   actions.append(statusTag);
 
-  const blocked = classIsSelected(classInfo) || classHasConflict(classInfo);
+  const alreadyInCart = appState.cart.some(
+    (item) => String(item.id) === String(classInfo.teaching_class_id || ""),
+  );
+  const blocked = classIsSelected(classInfo) || classHasConflict(classInfo) || alreadyInCart;
   const addButton = element(
     "button",
     "button button-secondary",
-    blocked ? (classIsSelected(classInfo) ? "已选" : "不可加入") : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
+    alreadyInCart
+      ? "已在清单"
+      : blocked
+        ? (classIsSelected(classInfo) ? "已选" : "不可加入")
+        : (classIsFull(classInfo) ? "加入候补" : "加入清单"),
   );
   addButton.type = "button";
-  addButton.disabled = blocked || Boolean(appState.session?.task_running);
+  addButton.disabled = blocked || !canMutateQueue();
+  if (!blocked && addButton.disabled) {
+    addButton.title = appState.session?.task_paused
+      ? "正在完成当前请求，请等待安全暂停"
+      : "请先暂停抢课任务";
+  }
   addButton.addEventListener("click", async () => {
     addButton.disabled = true;
     try {
@@ -1260,6 +1206,8 @@ function appendClassRow(container, course, classInfo) {
           course_name: String(course.course_name || ""),
           teacher_name: String(classInfo.teacher_name || ""),
           credit: String(course.credit || ""),
+          course_number: String(classInfo.course_number || course.course_number || ""),
+          time_signature: String(classInfo.time_signature || ""),
           auto_enabled: true,
           is_choose: String(classInfo.is_choose || ""),
           is_conflict: String(classInfo.is_conflict || ""),
@@ -1272,7 +1220,11 @@ function appendClassRow(container, course, classInfo) {
     } catch (error) {
       if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
     } finally {
-      addButton.disabled = blocked || Boolean(appState.session?.task_running);
+      const nowInCart = appState.cart.some(
+        (item) => String(item.id) === String(classInfo.teaching_class_id || ""),
+      );
+      if (nowInCart) addButton.textContent = "已在清单";
+      addButton.disabled = blocked || nowInCart || !canMutateQueue();
     }
   });
   actions.append(addButton);
@@ -1895,10 +1847,10 @@ function syncEnrollControls() {
     appElements.cartHint.textContent = appState.session?.task_stopping_reason
       || "待处理课程已清空，后台任务正在结束。";
   } else if (running && paused && !pauseAcknowledged) {
-    appElements.cartHint.textContent = "正在完成当前学校请求；安全暂停后即可移除清单中的课程。";
+    appElements.cartHint.textContent = "正在完成当前学校请求；安全暂停后即可增删课程或调整优先级。";
   } else if (running && paused) {
     appElements.cartHint.textContent = appState.session?.task_pause_reason
-      || "抢课任务已暂停，可以移除不再需要的课程，继续后会保留其余进度。";
+      || "抢课任务已安全暂停，可以增删课程或调整优先级；继续后保留已有尝试次数。";
   } else if (running) {
     appElements.cartHint.textContent = "后台抢课任务正在运行，清单已锁定，抢到的课程会自动进入我的课程。";
   } else if (appState.preselection) {
@@ -1949,6 +1901,7 @@ async function patchCartPreference(item, values) {
       method: "PATCH",
       body: JSON.stringify(values),
     });
+    await loadCart();
   } catch (error) {
     updateLocalCartPreference(item, previous);
     renderCart();
@@ -1963,13 +1916,16 @@ function makeCartPreferenceControl(item) {
   const toggle = element("input");
   toggle.type = "checkbox";
   toggle.checked = Boolean(preference.autoEnabled);
+  toggle.disabled = !canMutateQueue();
   toggle.setAttribute("aria-label", "自动抢课开关");
   label.append(toggle, element("span", "", "自动抢课"));
   toggle.addEventListener("change", () => patchCartPreference(item, { auto_enabled: toggle.checked }));
 
   const group = element("input", "cart-group-input");
   group.type = "text";
+  group.maxLength = 256;
   group.value = preference.priorityGroup;
+  group.disabled = !canMutateQueue();
   group.title = "同一优选组内按优先级尝试，优先级较高者先尝试";
   group.setAttribute("aria-label", "优选分组");
   group.addEventListener("change", () => patchCartPreference(item, { priority_group: group.value.trim() || "未分组课程" }));
@@ -1979,6 +1935,8 @@ function makeCartPreferenceControl(item) {
   const down = element("button", "button button-quiet", "↓");
   up.type = "button";
   down.type = "button";
+  up.disabled = !canMutateQueue();
+  down.disabled = !canMutateQueue();
   up.title = "提高同组优先级";
   down.title = "降低同组优先级";
   up.addEventListener("click", () => moveCartItem(item, -1));
@@ -2003,11 +1961,19 @@ async function moveCartItem(item, direction) {
   updateLocalCartPreference(other, { priorityRank: currentPreference.priorityRank });
   renderCart();
   try {
-    await Promise.all([
-      planApi(`/api/courses/${encodeURIComponent(item.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: otherPreference.priorityRank }) }),
-      planApi(`/api/courses/${encodeURIComponent(other.id)}`, { method: "PATCH", body: JSON.stringify({ priority_rank: currentPreference.priorityRank }) }),
-    ]);
+    await planApi("/api/courses/priority/order", {
+      method: "PATCH",
+      body: JSON.stringify({
+        updates: [
+          { id: item.id, priority_rank: otherPreference.priorityRank },
+          { id: other.id, priority_rank: currentPreference.priorityRank },
+        ],
+      }),
+    });
   } catch (error) {
+    updateLocalCartPreference(item, { priorityRank: currentPreference.priorityRank });
+    updateLocalCartPreference(other, { priorityRank: otherPreference.priorityRank });
+    renderCart();
     showToast(planErrorMessage(error), true);
   }
 }
@@ -2048,7 +2014,7 @@ function renderCart() {
     const actions = element("div", "cart-item-actions");
     const statusClass = item.status === "SUCCESS" ? "status-success" : item.status === "FAILED" ? "status-danger" : item.status === "ENROLLING" ? "status-warning" : "status-neutral";
     actions.append(element("span", `status-pill ${statusClass}`, statusNames[item.status] || "待启动"));
-    if (item.status === "FAILED" && appState.session?.logged_in && !appState.session?.task_running) {
+    if (item.status === "FAILED" && appState.session?.logged_in && canMutateQueue()) {
       const retry = element("button", "button button-secondary", "重新排队");
       retry.type = "button";
       retry.addEventListener("click", async () => {
@@ -2094,10 +2060,10 @@ function renderCart() {
         if (result.is_error) throw new Error(result.message);
         showToast(result.message || "已移除");
         if (result.progress) {
-          const cartControlsChanged = applyProgressTaskState(result.progress);
+          const { controlsChanged } = applyProgressTaskState(result.progress);
           renderProgress(result.progress);
           updateTaskIndicator();
-          if (cartControlsChanged) renderCart();
+          if (controlsChanged) renderCart();
         }
         await loadCart();
       } catch (error) {
@@ -2761,8 +2727,8 @@ async function toggleEnrollmentPause() {
       timeoutMs: SESSION_RECOVERY_TIMEOUT_MS,
     });
     if (result.progress) {
-      const cartControlsChanged = applyProgressTaskState(result.progress);
-      if (cartControlsChanged) renderCart();
+      const { controlsChanged } = applyProgressTaskState(result.progress);
+      if (controlsChanged) renderCart();
     }
     showToast(result.message || (paused ? "抢课任务已继续" : "抢课任务已暂停"), false, true);
     renderProgress(appState.progress);
@@ -2833,13 +2799,14 @@ async function loadEnrollProgress() {
   } finally {
     appState.loadingProgress = false;
   }
-  const cartControlsChanged = applyProgressTaskState(data);
+  const { controlsChanged, queueChanged } = applyProgressTaskState(data);
   applyEnrollSettings(data);
   renderProgress(data);
   updateTaskIndicator();
   setPhasePresentation();
   syncEnrollControls();
-  if (cartControlsChanged) renderCart();
+  if (queueChanged) await loadCart();
+  else if (controlsChanged) renderCart();
 
   for (const course of data.courses || []) {
     if (course.status === "SUCCESS" && !appState.knownSuccessIds.has(course.id)) {
@@ -2964,7 +2931,7 @@ appElements.resumeEnroll?.addEventListener("click", () => toggleEnrollPause(fals
 for (const button of appElements.modeButtons || []) {
   button.addEventListener("click", () => updateEnrollMode(button.dataset.enrollMode));
 }
-for (const input of [appElements.boostInterval, appElements.normalInterval, appElements.scanInterval, appElements.swapCourseSwitch, appElements.swapRiskConfirm, appElements.swapThreshold]) {
+for (const input of [appElements.boostInterval, appElements.normalInterval, appElements.scanInterval]) {
   input?.addEventListener("change", saveEnrollSettings);
 }
 appElements.campusSelect.addEventListener("change", () => {
@@ -3048,9 +3015,6 @@ appElements.logout.addEventListener("click", async () => {
     appState.cacheMode = false;
     clearCacheRefreshTimer();
     if (appElements.cacheModeSwitch) appElements.cacheModeSwitch.checked = false;
-    try {
-      window.sessionStorage?.removeItem(SESSION_CREDENTIALS_STORAGE_KEY);
-    } catch {}
     window.location.assign(cleanPagePath("/login"));
   } catch (error) {
     if (!(error instanceof SessionExpiredError)) showToast(error.message, true);
@@ -3062,10 +3026,9 @@ function openSchoolRawPage() {
     showToast("请先登录，再打开学校原始页面", true);
     return;
   }
-  // Same-origin path via the local reverse proxy; reuses the shared school
-  // session, so no second login (which would kick the API session out).
-  const target = `${window.location.origin}/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do`;
-  window.open(target, "_blank", "noopener,noreferrer");
+  api("/api/school/open", { method: "POST" })
+    .then((result) => showToast(result.message || "已打开学校官方页面", false, true))
+    .catch((error) => showToast(error.message || "无法打开学校官方页面", true));
 }
 
 for (const closeButton of document.querySelectorAll("[data-close-dialog]")) {

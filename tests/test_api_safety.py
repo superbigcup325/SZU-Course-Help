@@ -22,19 +22,26 @@ def test_runtime_registers_startup_and_shutdown_hooks():
     assert app.app.router.lifespan_context is app.app_lifespan
 
 
-def test_startup_hook_restores_persisted_session(monkeypatch):
-    restored = []
+def test_startup_hook_starts_one_session_coordinator_without_disk_restore(monkeypatch):
+    started = []
     monkeypatch.setattr(app, "_runtime_started", False)
     monkeypatch.setattr(
-        app,
-        "restore_login_state",
-        lambda: restored.append("restore") or "2024110122",
+        type(app.session_manager),
+        "keepalive_running",
+        property(lambda _manager: bool(started)),
     )
-    monkeypatch.setattr(app, "_keep_alive_loop", lambda: None)
+    monkeypatch.setattr(
+        app.session_manager,
+        "start_keepalive",
+        lambda callback, should_run, *, interval_seconds: (
+            started.append((callback, should_run, interval_seconds)) or True
+        ),
+    )
 
     asyncio.run(app.startup_runtime_services())
+    asyncio.run(app.startup_runtime_services())
 
-    assert restored == ["restore"]
+    assert started == [(app._keep_alive_once, app.is_enroll_task_running, 60)]
     assert app._runtime_started is True
 
 
@@ -44,6 +51,8 @@ def set_logged_session(monkeypatch, *, batch_code="batch", batch_name="预选阶
     monkeypatch.setattr(config, "student_id", "2024110122")
     monkeypatch.setattr(config, "elective_batch_code", batch_code)
     monkeypatch.setattr(config, "elective_batch_name", batch_name)
+    monkeypatch.setattr(config, "campus_code", "01")
+    monkeypatch.setattr(config, "campus_name", "粤海校区")
 
 
 def test_health_and_static_login_page():
@@ -178,37 +187,25 @@ def test_webvpn_auth_start_and_status_routes(monkeypatch):
     }
 
 
-def test_school_proxy_route_separates_host_from_school_path(monkeypatch):
-    async def fake_proxy(request, school_path):
-        return {"school_path": school_path}
-
-    monkeypatch.setattr(app, "proxy_request", fake_proxy)
-
+def test_school_proxy_route_is_explicitly_disabled():
     response = client.get("/proxy/bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/%2Adefault/index.do")
-    assert response.status_code == 200
-    assert response.json()["school_path"] == "xsxkapp/sys/xsxkapp/*default/index.do"
+    assert response.status_code == 410
+    assert response.json()["error_code"] == "SCHOOL_PROXY_DISABLED"
 
-    unsupported = client.get("/proxy/evil.example/x")
-    assert unsupported.status_code == 404
-
-
-def test_card_key_endpoint_issues_verifiable_key(tmp_path, monkeypatch):
-    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
-
-    response = client.post("/api/card_key", json={"student_id": "2024110122"})
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["student_id"] == "2024110122"
-    assert body["card_key"].startswith("SZU3.")
-    assert key_manager.verify_card_key("2024110122", body["card_key"]) is True
+    mutating = client.post("/proxy/bkxk.szu.edu.cn/enroll", content=b"unsafe")
+    assert mutating.status_code == 410
+    assert mutating.json()["error_code"] == "SCHOOL_PROXY_DISABLED"
 
 
-def test_card_key_endpoint_rejects_invalid_student_id(tmp_path, monkeypatch):
-    monkeypatch.setenv("COURSE_SELECT_KEY_DIR", str(tmp_path / "keys"))
-
-    response = client.post("/api/card_key", json={"student_id": "abc"})
-    assert response.status_code == 422
+def test_card_key_is_terminal_prefilled_and_has_no_web_issuance_endpoint():
+    app.configure_runtime_prefill("2024110122", "SZU3.terminal-only")
+    try:
+        bootstrap = client.get("/api/bootstrap").json()
+        assert bootstrap["student_id"] == "2024110122"
+        assert bootstrap["card_key"] == "SZU3.terminal-only"
+        assert client.post("/api/card_key", json={"student_id": "2024110122"}).status_code == 405
+    finally:
+        app.configure_runtime_prefill("", "")
 
 
 def test_captcha_api_reports_closed_window_without_generic_502(monkeypatch):
@@ -321,37 +318,26 @@ def test_session_uses_backend_phase_classification(monkeypatch):
     assert body["automatic_enroll_allowed"] is False
 
 
-def test_expired_restored_session_starts_automatic_relogin(monkeypatch):
+def test_session_snapshot_is_memory_only_and_does_not_probe_school(monkeypatch):
     set_logged_session(monkeypatch)
-    monkeypatch.setattr(app, "consume_restored_session_validation", lambda: True)
     monkeypatch.setattr(
         app,
         "refresh_elective_batch",
-        lambda *_args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
-    )
-    relogin_called = []
-    monkeypatch.setattr(
-        app,
-        "attempt_automatic_relogin",
-        lambda *args, **kwargs: relogin_called.append(args) or (False, "ocr failed"),
+        lambda *_args: (_ for _ in ()).throw(AssertionError("session GET must stay local")),
     )
 
     response = client.get("/api/session")
 
-    assert response.status_code == 401
-    assert response.json()["error_code"] == "SESSION_RESTORE_EXPIRED"
-    assert response.json()["requires_manual_login"] is True
-    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
-    assert "OCR 自动重登录失败" in response.json()["message"]
-    assert config.token == ""
-    assert config.combined_cookie == ""
+    assert response.status_code == 200
+    assert response.json()["logged_in"] is True
 
 
 def test_course_api_converts_ui_pages_to_school_zero_based_pages(monkeypatch):
     observed_pages = []
 
-    def fake_query(course_type, school_page):
+    def fake_query(course_type, school_page, context):
         observed_pages.append((course_type, school_page))
+        assert context.student_id == "2024110122"
         return (
             True,
             {
@@ -392,8 +378,9 @@ def test_live_course_response_updates_persistent_cache(monkeypatch, tmp_path):
     assert body["cached"] is False
     assert body["has_cache"] is True
     assert body["cached_at"] > 0
-    assert body["cache_version"] == 1
-    assert course_cache_service.get("TJKC", 1, 10)["courses"] == payload["courses"]
+    assert body["cache_schema_version"] == course_cache_service.CACHE_SCHEMA_VERSION
+    scope = course_cache_service.scope_from_snapshot(app.get_session_snapshot())
+    assert course_cache_service.get_page(scope, "TJKC", 1, 10)["courses"] == payload["courses"]
 
 
 def test_cache_mode_returns_cached_course_without_school_request(monkeypatch, tmp_path):
@@ -405,7 +392,8 @@ def test_cache_mode_returns_cached_course_without_school_request(monkeypatch, tm
         "msg": "",
         "is_error": False,
     }
-    course_cache_service.put("TJKC", 1, 10, payload)
+    scope = course_cache_service.scope_from_snapshot(app.get_session_snapshot())
+    course_cache_service.put_page(scope, "TJKC", 1, 10, payload)
     monkeypatch.setattr(
         app,
         "query_courses",
@@ -419,7 +407,7 @@ def test_cache_mode_returns_cached_course_without_school_request(monkeypatch, tm
     assert response.json()["courses"] == payload["courses"]
 
 
-def test_cache_mode_can_read_full_catalog_without_login(monkeypatch, tmp_path):
+def test_cache_mode_reads_only_terminal_accounts_latest_scoped_catalog(monkeypatch, tmp_path):
     monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
     payload = {
         "total_count": 2,
@@ -427,23 +415,33 @@ def test_cache_mode_can_read_full_catalog_without_login(monkeypatch, tmp_path):
         "msg": "",
         "is_error": False,
     }
-    course_cache_service.put_full("FANKC", payload)
+    scope = course_cache_service.CatalogCacheScope("2024110122", "batch-a", "01")
+    course_cache_service.put_full(scope, "FANKC", payload)
     monkeypatch.setattr(config, "token", "")
     monkeypatch.setattr(config, "combined_cookie", "")
+    monkeypatch.setattr(config, "student_id", "")
+    app.configure_runtime_prefill("2024110122", "SZU3.terminal")
     monkeypatch.setattr(
         app,
         "query_courses",
         lambda *_args: (_ for _ in ()).throw(AssertionError("offline cache must not query school")),
     )
 
-    response = client.get("/api/school/courses?type=FANKC&page=99&page_size=10&cache_mode=true")
-
-    assert response.status_code == 200
-    assert response.json()["full_catalog"] is True
-    assert response.json()["courses"] == payload["courses"]
+    try:
+        response = client.get("/api/school/courses?type=FANKC&page=99&page_size=10&cache_mode=true")
+        assert response.status_code == 200
+        assert response.json()["full_catalog"] is True
+        assert response.json()["courses"] == payload["courses"]
+        assert response.json()["cache_scope"] == {
+            "batch_code": "batch-a",
+            "campus_code": "01",
+        }
+    finally:
+        app.configure_runtime_prefill("", "")
 
 
 def test_full_catalog_refresh_collects_all_pages(monkeypatch, tmp_path):
+    set_logged_session(monkeypatch)
     monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
     first_page = {
         "total_count": 11,
@@ -460,21 +458,56 @@ def test_full_catalog_refresh_collects_all_pages(monkeypatch, tmp_path):
     monkeypatch.setattr(
         app,
         "query_courses",
-        lambda course_type, page: (
+        lambda course_type, page, context: (
             (True, last_page, "方案内课程")
             if (course_type, page) == ("FANKC", 1)
             else (_ for _ in ()).throw(AssertionError("unexpected page"))
         ),
     )
 
-    app._cache_full_catalog("FANKC", 1, first_page)
+    scope, context = app._catalog_context()
+    app._cache_full_catalog(scope, context, "FANKC", 1, first_page)
 
-    cached = course_cache_service.get_full("FANKC")
+    cached = course_cache_service.get_full(scope, "FANKC")
     assert cached["total_count"] == 11
     assert [item["course_name"] for item in cached["courses"]] == [f"课程{i}" for i in range(11)]
 
 
-def test_cache_mode_miss_falls_back_to_live_course_request(monkeypatch, tmp_path):
+def test_full_catalog_refresh_discards_response_when_scope_changes_mid_request(
+    monkeypatch,
+    tmp_path,
+):
+    set_logged_session(monkeypatch)
+    monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
+    first_page = {
+        "total_count": 11,
+        "courses": [{"course_name": f"课程{i}"} for i in range(10)],
+        "msg": "",
+        "is_error": False,
+    }
+    last_page = {
+        "total_count": 11,
+        "courses": [{"course_name": "课程10"}],
+        "msg": "",
+        "is_error": False,
+    }
+    scope, context = app._catalog_context()
+
+    def switch_scope_during_query(course_type, page, request_context):
+        assert (course_type, page, request_context) == ("FANKC", 1, context)
+        config.campus_code = "02"
+        return True, last_page, "方案内课程"
+
+    monkeypatch.setattr(app, "query_courses", switch_scope_during_query)
+
+    app._cache_full_catalog(scope, context, "FANKC", 1, first_page)
+
+    assert course_cache_service.get_page(scope, "FANKC", 1, 10) is not None
+    assert course_cache_service.get_page(scope, "FANKC", 2, 10) is None
+    assert course_cache_service.get_full(scope, "FANKC") is None
+
+
+def test_cache_mode_miss_never_falls_back_to_school(monkeypatch, tmp_path):
     set_logged_session(monkeypatch)
     monkeypatch.setattr(course_cache_service, "_path", tmp_path / "courses.json")
     payload = {
@@ -487,15 +520,14 @@ def test_cache_mode_miss_falls_back_to_live_course_request(monkeypatch, tmp_path
     monkeypatch.setattr(
         app,
         "query_courses",
-        lambda course_type, page: observed.append((course_type, page)) or (True, payload, "课程"),
+        lambda *args: observed.append(args) or (True, payload, "课程"),
     )
 
     response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10&cache_mode=true")
 
-    assert response.status_code == 200
-    assert response.json()["cached"] is False
-    assert observed == [("TJKC", 0)]
-    assert course_cache_service.get("TJKC", 1, 10)["courses"] == payload["courses"]
+    assert response.status_code == 404
+    assert response.json()["error_code"] == "COURSE_CACHE_MISS"
+    assert observed == []
 
 
 def test_live_refresh_failure_keeps_existing_course_cache(monkeypatch, tmp_path):
@@ -507,7 +539,8 @@ def test_live_refresh_failure_keeps_existing_course_cache(monkeypatch, tmp_path)
         "msg": "",
         "is_error": False,
     }
-    course_cache_service.put("TJKC", 1, 10, original)
+    scope = course_cache_service.scope_from_snapshot(app.get_session_snapshot())
+    course_cache_service.put_page(scope, "TJKC", 1, 10, original)
     monkeypatch.setattr(
         app,
         "query_courses",
@@ -517,7 +550,7 @@ def test_live_refresh_failure_keeps_existing_course_cache(monkeypatch, tmp_path)
     response = client.get("/api/school/courses?type=TJKC&page=1&page_size=10")
 
     assert response.status_code == 504
-    assert course_cache_service.get("TJKC", 1, 10)["courses"] == original["courses"]
+    assert course_cache_service.get_page(scope, "TJKC", 1, 10)["courses"] == original["courses"]
 
 
 def test_closed_phase_does_not_query_school_course_endpoint(monkeypatch):
@@ -804,6 +837,24 @@ def test_enrollment_start_explains_when_all_pending_courses_are_disabled(tmp_pat
     assert "自动抢课" in body["message"]
 
 
+def test_cart_preferences_rejects_coerced_boolean_and_unknown_fields():
+    coerced = client.patch("/api/courses/course-1", json={"auto_enabled": "false"})
+    unknown = client.patch("/api/courses/course-1", json={"auto_enabled": False, "other": 1})
+
+    assert coerced.status_code == 422
+    assert unknown.status_code == 422
+
+
+def test_cart_preferences_rejects_null_or_empty_payload():
+    null_value = client.patch("/api/courses/course-1", json={"auto_enabled": None})
+    empty = client.patch("/api/courses/course-1", json={})
+
+    assert null_value.status_code == 400
+    assert null_value.json()["error_code"] == "INVALID_COURSE_PREFERENCE"
+    assert empty.status_code == 400
+    assert empty.json()["error_code"] == "INVALID_COURSE_PREFERENCE"
+
+
 def test_worker_start_failure_preserves_pending_cart(tmp_path, monkeypatch):
     db = DatabaseManager(str(tmp_path / "worker-start-error.db"))
     monkeypatch.setattr(cart_service, "db", db)
@@ -1012,7 +1063,7 @@ def test_keep_alive_starts_automatic_relogin_without_active_session(monkeypatch)
     assert relogin_called == [(config.ocr_relogin_max_attempts,)]
 
 
-def test_click_relogin_endpoint_starts_recovery_immediately(monkeypatch):
+def test_click_relogin_endpoint_rejects_browser_credentials(monkeypatch):
     monkeypatch.setattr(config, "token", "")
     monkeypatch.setattr(config, "combined_cookie", "")
     monkeypatch.setattr(config, "student_id", "2024110122")
@@ -1029,24 +1080,10 @@ def test_click_relogin_endpoint_starts_recovery_immediately(monkeypatch):
         json={"student_id": "2024110122", "password": "secret", "backend": "webvpn"},
     )
 
-    assert response.status_code == 200
-    assert called == [{"student_id": "2024110122", "password": "secret", "backend": "webvpn"}]
-    assert response.json()["message"] == "正在自动重新登录，请稍候"
-
-
-def test_click_relogin_requires_webvpn_auth_for_webvpn_backend(monkeypatch):
-    monkeypatch.setattr(
-        app, "start_automatic_relogin", lambda **kwargs: (False, "请先完成 WebVPN 统一认证")
-    )
-
-    response = client.post(
-        "/api/session/recover",
-        json={"student_id": "2024110122", "password": "secret", "backend": "webvpn"},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["error_code"] == "SESSION_RECOVERY_UNAVAILABLE"
-    assert response.json()["message"] == "请先完成 WebVPN 统一认证"
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "SESSION_RECOVERY_BODY_NOT_ALLOWED"
+    assert called == []
+    assert response.json()["message"] == "自动重登录只使用当前进程内存中的登录凭据"
 
 
 def test_relogin_endpoint_accepts_bodyless_local_request(monkeypatch):
@@ -1066,7 +1103,6 @@ def test_keep_alive_refreshes_session_when_logged_in(monkeypatch):
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
     called = []
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
     monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: called.append(args))
 
     app._keep_alive_once()
@@ -1079,7 +1115,6 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     monkeypatch.setattr(config, "token", "expired-token")
     monkeypatch.setattr(config, "combined_cookie", "cookie")
     monkeypatch.setattr(config, "student_id", "2024110122")
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
     monkeypatch.setattr(
         app,
         "refresh_elective_batch",
@@ -1097,62 +1132,11 @@ def test_keep_alive_triggers_ocr_recovery_on_expiry(monkeypatch):
     assert len(relogin_called) == 1
 
 
-def test_keep_alive_recovers_unvalidated_restored_session(monkeypatch):
-    monkeypatch.setattr(config, "token", "expired-token")
-    monkeypatch.setattr(config, "combined_cookie", "cookie")
+def test_keep_alive_recovers_missing_session_from_memory_credentials(monkeypatch):
+    monkeypatch.setattr(config, "token", "")
+    monkeypatch.setattr(config, "combined_cookie", "")
     monkeypatch.setattr(config, "student_id", "2024110122")
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[0])
-    monkeypatch.setattr(app, "restored_session_validation_pending", lambda: True)
-    monkeypatch.setattr(
-        app,
-        "refresh_elective_batch",
-        lambda *args: (_ for _ in ()).throw(logic.SchoolBatchSessionExpiredError("expired")),
-    )
-    relogin_called = []
-    monkeypatch.setattr(
-        app,
-        "attempt_automatic_relogin",
-        lambda *args, **kwargs: relogin_called.append(args) or (False, "ocr failed"),
-    )
-
-    app._keep_alive_once()
-
-    assert config.token == ""
-    assert config.combined_cookie == ""
-    assert relogin_called == [(config.ocr_relogin_max_attempts,)]
-
-
-def test_keep_alive_randomly_uses_an_authenticated_read_api(monkeypatch):
-    monkeypatch.setattr(config, "token", "active-token")
-    monkeypatch.setattr(config, "combined_cookie", "cookie")
-    monkeypatch.setattr(config, "student_id", "2024110122")
-    called = []
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[1])
-    monkeypatch.setattr(app, "get_enrolled_courses", lambda: called.append("enrolled"))
-
-    assert client.get("/api/session").status_code == 200
-    app._keep_alive_once()
-
-    assert called == ["enrolled"]
-
-
-def test_keep_alive_starts_relogin_when_random_read_api_reports_expiry(monkeypatch):
-    monkeypatch.setattr(config, "token", "expired-token")
-    monkeypatch.setattr(config, "combined_cookie", "cookie")
-    monkeypatch.setattr(config, "student_id", "2024110122")
-    monkeypatch.setattr(app.random, "choice", lambda choices: choices[1])
-    monkeypatch.setattr(app, "restored_session_validation_pending", lambda: False)
-    monkeypatch.setattr(
-        app,
-        "get_enrolled_courses",
-        lambda: (False, app.SESSION_EXPIRED),
-    )
-    fallback_called = []
-    monkeypatch.setattr(
-        app,
-        "refresh_elective_batch",
-        lambda *args: fallback_called.append(args),
-    )
+    monkeypatch.setattr(config, "password", "memory-only-secret")
     relogin_called = []
     monkeypatch.setattr(
         app,
@@ -1163,7 +1147,44 @@ def test_keep_alive_starts_relogin_when_random_read_api_reports_expiry(monkeypat
     app._keep_alive_once()
 
     assert relogin_called == [(config.ocr_relogin_max_attempts,)]
-    assert fallback_called == []
+
+
+def test_keep_alive_uses_only_the_canonical_batch_probe(monkeypatch):
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    enrolled_called = []
+    batch_called = []
+    monkeypatch.setattr(app, "get_enrolled_courses", lambda: enrolled_called.append(True))
+    monkeypatch.setattr(app, "refresh_elective_batch", lambda *args: batch_called.append(args))
+
+    app._keep_alive_once()
+
+    assert len(batch_called) == 1
+    assert enrolled_called == []
+
+
+def test_keep_alive_network_failure_does_not_invalidate_or_start_relogin(monkeypatch):
+    monkeypatch.setattr(config, "token", "active-token")
+    monkeypatch.setattr(config, "combined_cookie", "cookie")
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(
+        app,
+        "refresh_elective_batch",
+        lambda *args: (_ for _ in ()).throw(requests.ConnectionError("offline")),
+    )
+    relogin_called = []
+    monkeypatch.setattr(
+        app,
+        "attempt_automatic_relogin",
+        lambda *args, **kwargs: relogin_called.append(args) or (True, ""),
+    )
+
+    app._keep_alive_once()
+
+    assert relogin_called == []
+    assert config.token == "active-token"
+    assert config.combined_cookie == "cookie"
 
 
 def test_captcha_solve_rejects_missing_image():

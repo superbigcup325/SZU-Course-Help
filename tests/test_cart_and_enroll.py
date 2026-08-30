@@ -61,13 +61,15 @@ def test_grab_courses_uses_existing_request_function_and_marks_success(tmp_path,
     monkeypatch.setattr(
         enroll_service.choose_course,
         "submit_course_selection",
-        lambda class_id, course_type: calls.append((class_id, course_type)) or FakeResponse(),
+        lambda class_id, course_type, campus: (
+            calls.append((class_id, course_type, campus)) or FakeResponse()
+        ),
     )
     monkeypatch.setattr(config, "count", 1)
     monkeypatch.setattr(config, "delay", 0)
 
     assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.COMPLETED
-    assert calls == [("class-1", "FANKC")]
+    assert calls == [("class-1", "FANKC", "01")]
     assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == "class-1"
 
 
@@ -128,7 +130,7 @@ def test_existing_db_migrates_teaching_place_column(tmp_path):
     assert rows[0]["course_name"] == ""
     assert rows[0]["teacher_name"] == ""
     assert rows[0]["auto_enabled"] == 1
-    assert rows[0]["priority_group"] == ""
+    assert rows[0]["priority_group"] == "未分组课程"
     assert rows[0]["priority_rank"] == 0
     assert rows[0]["course_number"] == ""
     assert rows[0]["time_signature"] == ""

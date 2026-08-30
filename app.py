@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
-import re
 import socket
 import threading
 import webbrowser
@@ -18,7 +16,7 @@ from urllib.parse import urlsplit
 import requests
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from starlette.responses import FileResponse, JSONResponse
 
 import config
@@ -31,28 +29,20 @@ from campus import (
     get_campus,
 )
 from card_key import verify_card_key
+from course_list import CatalogRequestContext
 from logging_config import configure_logging
 from project_paths import resource_path
-from security.key_manager import (
-    KeyManagementError,
-    generate_card_key,
-    get_or_create_key_pair,
-)
-from services import backend_service, cart_service, proxy_service, webvpn_auth_service
+from services import backend_service, cart_service, webvpn_auth_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
     attempt_automatic_relogin,
     automatic_relogin_available,
     clear_elective_batch,
     clear_login_state,
-    consume_restored_session_validation,
     encrypt_password,
     get_session_snapshot,
-    invalidate_school_session,
     perform_school_login,
     refresh_elective_batch,
-    restore_login_state,
-    restored_session_validation_pending,
     save_login_state,
     set_current_campus,
     start_automatic_relogin,
@@ -60,11 +50,16 @@ from services.auth_service import (
     validate_login_params,
 )
 from services.cache_service import get_no_cache_headers
-from services.course_cache_service import annotate_live as annotate_live_course_cache
-from services.course_cache_service import get as get_course_cache
+from services.course_cache_service import (
+    CatalogCacheScope,
+    get_latest_full_for_student,
+    get_latest_page_for_student,
+    scope_from_snapshot,
+)
 from services.course_cache_service import get_full as get_full_course_cache
-from services.course_cache_service import put as put_course_cache
+from services.course_cache_service import get_page as get_course_cache
 from services.course_cache_service import put_full as put_full_course_cache
+from services.course_cache_service import put_page as put_course_cache
 from services.course_service import (
     COURSE_QUERY_REJECTED,
     COURSE_RESPONSE_INVALID,
@@ -76,6 +71,7 @@ from services.course_service import (
     query_courses,
 )
 from services.enroll_service import (
+    add_cart_course,
     get_enroll_progress,
     get_enroll_settings,
     get_enroll_task_state,
@@ -83,22 +79,24 @@ from services.enroll_service import (
     pause_enroll_task,
     remove_cart_course,
     resume_enroll_task,
+    retry_cart_course,
     set_enroll_mode,
     start_enroll_worker,
     stop_enroll_task,
+    update_cart_course_preferences,
+    update_cart_course_priorities,
     update_enroll_settings,
 )
-from services.proxy_service import SCHOOL_HOST, clear_proxy_cookie_mirror
+from services.session_manager import session_manager
 from services.timetable_service import build_timetable
 from services.webvpn_auth_service import ControlledBrowserUnavailableError
-
-proxy_request = proxy_service.proxy_request
 
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260829.2"
+UI_ASSET_BUILD = "20260831.1"
 logger = logging.getLogger(__name__)
+OFFICIAL_SCHOOL_HOME_URL = f"{config.SCHOOL_BASE_URL}*default/index.do"
 
 
 def _preferred_port() -> int:
@@ -147,7 +145,7 @@ LOCAL_ORIGINS = (
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.4.0")
+app = FastAPI(title="深大抢课助手 API", version="3.6.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
@@ -221,14 +219,6 @@ class LoginRequest(BaseModel):
     backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
 
 
-class SessionRecoverRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    student_id: str = Field(min_length=6, max_length=12, pattern=r"^\d+$")
-    password: str = Field(min_length=1, max_length=256)
-    backend: str = Field(default=config.BACKEND_AUTO, pattern=r"^(auto|primary|webvpn)$")
-
-
 class BackendSelectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -243,22 +233,6 @@ class WebVPNAuthStartRequest(BaseModel):
         min_length=1,
         max_length=512,
     )
-
-
-class ProxyBrowserOpenRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target_path: str = Field(
-        default="/xsxkapp/sys/xsxkapp/*default/index.do",
-        min_length=1,
-        max_length=512,
-    )
-
-
-class CardKeyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    student_id: str = Field(min_length=6, max_length=12, pattern=r"^\d+$")
 
 
 class ApiMessage(BaseModel):
@@ -301,6 +275,14 @@ class CartCourse(BaseModel):
         return self.course_type
 
 
+class CartPreferencesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auto_enabled: StrictBool | None = None
+    priority_group: str | None = Field(default=None, max_length=256, strict=True)
+    priority_rank: int | None = Field(default=None, ge=0, le=100000, strict=True)
+
+
 class EnrollmentStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -319,12 +301,6 @@ class EnrollmentSettingsRequest(BaseModel):
     boost_interval_ms: int | None = Field(default=None, ge=0, le=300000)
     normal_interval_ms: int | None = Field(default=None, ge=0, le=300000)
     scan_interval_ms: int | None = Field(default=None, ge=0, le=300000)
-    switch_enabled: bool | None = None
-    switch_confirmed: bool | None = None
-    switch_threshold: int | None = Field(default=None, ge=0, le=1000)
-    swap_enabled: bool | None = None
-    swap_confirmed: bool | None = None
-    swap_threshold: int | None = Field(default=None, ge=0, le=1000)
     mode: str | None = Field(default=None, pattern=r"^(boost|normal|scan)$")
 
 
@@ -340,22 +316,22 @@ _runtime_started = False
 
 
 def _start_runtime_services() -> None:
-    """Restore persisted state and start process-local background services once."""
+    """Start the one process-local session coordinator once."""
     global _runtime_started
     with _runtime_start_lock:
-        if _runtime_started:
+        if _runtime_started and session_manager.keepalive_running:
             return
-        restored = restore_login_state()
-        if restored:
-            logger.info("Restored persisted school session for student ending in %s", restored[-4:])
-        keep_alive = threading.Thread(
-            target=_keep_alive_loop,
-            name="session-keep-alive",
-            daemon=True,
+        started = session_manager.start_keepalive(
+            _keep_alive_once,
+            is_enroll_task_running,
+            interval_seconds=KEEP_ALIVE_INTERVAL_SECONDS,
         )
-        keep_alive.start()
-        logger.info("Session keep-alive started (every %ds)", KEEP_ALIVE_INTERVAL_SECONDS)
-        _runtime_started = True
+        _runtime_started = started or session_manager.keepalive_running
+        if started:
+            logger.info(
+                "Session coordinator started (active-task keep-alive every %ds)",
+                KEEP_ALIVE_INTERVAL_SECONDS,
+            )
 
 
 async def startup_runtime_services() -> None:
@@ -363,13 +339,17 @@ async def startup_runtime_services() -> None:
 
 
 async def shutdown_runtime_services() -> None:
+    global _runtime_started
+    session_manager.stop_keepalive()
+    with _runtime_start_lock:
+        _runtime_started = session_manager.keepalive_running
     webvpn_auth_service.close_auth()
     database.DatabaseManager.close_all()
 
 
 @asynccontextmanager
 async def app_lifespan(_app: FastAPI):
-    """Manage process-level session restoration and browser cleanup."""
+    """Manage the process-level session coordinator and browser cleanup."""
     await startup_runtime_services()
     try:
         yield
@@ -486,6 +466,7 @@ def _session_payload() -> dict:
         "task_paused_at": task_state["paused_at"],
         "task_stopping": task_state["stopping"],
         "task_stopping_reason": task_state["stopping_reason"],
+        "task_queue_revision": task_state["queue_revision"],
         "campus_options": campus_options_payload(),
         **backend_service.backend_payload(),
     }
@@ -534,34 +515,9 @@ async def api_bootstrap():
     )
 
 
-@app.post("/api/card_key", status_code=status.HTTP_200_OK)
-async def api_generate_card_key(req: CardKeyRequest):
-    """Issue a student-bound Card Key V3 straight from the login page.
-
-    Generating the key locally from the student number removes the terminal-only
-    step so the Web UI and the sign-in screen share the same entry point.
-    """
-    student_id = req.student_id.strip()
-    if not re.fullmatch(r"^\d{6,12}$", student_id):
-        return JSONResponse(
-            status_code=400,
-            content={"message": "学号必须是 6 至 12 位数字", "is_error": True},
-        )
-    try:
-        private_key = get_or_create_key_pair()
-        card_key = generate_card_key(student_id, private_key)
-        return {"card_key": card_key, "student_id": student_id}
-    except (KeyManagementError, OSError, ValueError) as exc:
-        logger.warning("Card-key generation failed: %s", exc)
-        return JSONResponse(
-            status_code=500,
-            content={"message": f"卡密生成失败: {exc}", "is_error": True},
-        )
-
-
 @app.post("/api/backend/select")
 async def api_select_backend(req: BackendSelectRequest):
-    """Select the school backend used by subsequent login and API requests."""
+    """Select the login/read preference; enrollment writes stay on primary."""
     preference = update_backend_preference(req.backend)
     payload = backend_service.backend_payload()
     if preference == config.BACKEND_WEBVPN and not payload["webvpn_authenticated"]:
@@ -742,7 +698,7 @@ async def api_captcha(backend: str | None = Query(default=None)):
         )
 
 
-CAPTCHA_SOLVE_MAX_RETRIES = 20
+CAPTCHA_SOLVE_MAX_RETRIES = config.ocr_relogin_max_attempts
 
 
 @app.post("/api/captcha/solve", status_code=status.HTTP_200_OK)
@@ -830,58 +786,23 @@ async def api_captcha_solve(payload: dict):
 
 @app.get("/api/session")
 async def api_session():
-    payload = _session_payload()
-    if payload["logged_in"] and consume_restored_session_validation():
-        try:
-            await asyncio.to_thread(
-                refresh_elective_batch,
-                str(payload["student_id"]),
-                config.token,
-            )
-            payload = _session_payload()
-        except logic.SchoolBatchSessionExpiredError:
-            invalidate_school_session()
-            logger.info("Restored session expired; starting OCR recovery")
-            recovered, error = await asyncio.to_thread(
-                attempt_automatic_relogin,
-                config.ocr_relogin_max_attempts,
-            )
-            if recovered:
-                payload = _session_payload()
-            else:
-                return _automatic_relogin_response(
-                    error,
-                    error_code="SESSION_RESTORE_EXPIRED",
-                )
-        except logic.ElectiveBatchUnavailableError as exc:
-            clear_elective_batch()
-            logger.info("Restored session is valid but no batch is available: %s", exc)
-        except (requests.Timeout, requests.RequestException) as exc:
-            logger.info("Restored session validation deferred after network issue: %s", exc)
-        except Exception as exc:
-            logger.warning("Restored session validation failed without expiring session: %s", exc)
     return JSONResponse(
-        content=payload,
+        content=_session_payload(),
         headers=get_no_cache_headers(),
     )
 
 
 @app.post("/api/session/recover")
-async def api_session_recover(request: SessionRecoverRequest | None = None):
-    """Start OCR recovery immediately when the user clicks the login status.
-
-    Browser clients send their current tab credentials explicitly.  A bodyless
-    request remains supported for local tools and falls back to credentials
-    retained by this process, if any.
-    """
-    if request is None:
-        started, message = start_automatic_relogin()
-    else:
-        started, message = start_automatic_relogin(
-            student_id=request.student_id.strip(),
-            password=request.password,
-            backend=request.backend,
+async def api_session_recover(request: Request):
+    """Start OCR recovery using credentials retained only in process memory."""
+    if (await request.body()).strip():
+        return _api_error(
+            400,
+            "自动重登录只使用当前进程内存中的登录凭据",
+            "SESSION_RECOVERY_BODY_NOT_ALLOWED",
+            retryable=False,
         )
+    started, message = start_automatic_relogin()
     if not started:
         snapshot = get_session_snapshot()
         failure_count = int(snapshot.get("relogin_failure_count", 0))
@@ -982,13 +903,11 @@ async def api_logout():
             status_code=409,
             content={"message": "抢课任务运行中，暂不能清除登录态", "is_error": True},
         )
-    webvpn_auth_service.clear_proxy_cookies()
     clear_login_state()
-    response = JSONResponse(
+    return JSONResponse(
         content=ApiMessage(message="已清除本地登录态", is_error=False).model_dump(),
         headers=get_no_cache_headers(),
     )
-    return clear_proxy_cookie_mirror(response)
 
 
 @app.post("/api/session/campus")
@@ -1018,8 +937,68 @@ _full_catalog_refreshing: set[str] = set()
 _full_catalog_refresh_lock = threading.Lock()
 
 
-def _cache_full_catalog(course_type: str, requested_page: int, first_payload: dict) -> None:
-    """Fetch and persist every page for the categories used as local catalogs."""
+def _catalog_context() -> tuple[CatalogCacheScope, CatalogRequestContext]:
+    """Capture every cache/request scope field before background work starts."""
+    snapshot = get_session_snapshot()
+    scope = scope_from_snapshot(snapshot)
+    context = CatalogRequestContext(
+        student_id=str(snapshot["student_id"]),
+        campus_code=str(snapshot["campus_code"]),
+        batch_code=str(snapshot["batch_code"]),
+        token=str(config.token),
+        cookie=str(config.combined_cookie),
+        backend_preference=backend_service.get_preference(),
+    )
+    return scope, context
+
+
+def _catalog_context_is_current(scope: CatalogCacheScope, context: CatalogRequestContext) -> bool:
+    """Reject a cache write if login, batch, campus, token, or cookie changed."""
+    try:
+        current_scope = scope_from_snapshot(get_session_snapshot())
+    except ValueError:
+        return False
+    return (
+        current_scope == scope
+        and str(config.token) == context.token
+        and str(config.combined_cookie) == context.cookie
+    )
+
+
+def _cached_catalog_for_request(
+    snapshot: dict,
+    course_type: str,
+    page: int,
+    page_size: int,
+) -> dict | None:
+    """Resolve cache data without contacting school or crossing account scopes."""
+    try:
+        scope = scope_from_snapshot(snapshot)
+    except ValueError:
+        scope = None
+    if scope is not None:
+        cached = get_full_course_cache(scope, course_type)
+        if cached is None:
+            cached = get_course_cache(scope, course_type, page, page_size)
+        return cached
+
+    student_id = str(snapshot.get("student_id") or _runtime_prefill["student_id"] or "").strip()
+    if not student_id:
+        return None
+    cached = get_latest_full_for_student(student_id, course_type)
+    if cached is None:
+        cached = get_latest_page_for_student(student_id, course_type, page, page_size)
+    return cached
+
+
+def _cache_full_catalog(
+    scope: CatalogCacheScope,
+    context: CatalogRequestContext,
+    course_type: str,
+    requested_page: int,
+    first_payload: dict,
+) -> None:
+    """Fetch every page under one immutable account/batch/campus snapshot."""
     normalized_type = course_type.strip().upper()
     if normalized_type not in {"TJKC", "FANKC"}:
         return
@@ -1033,10 +1012,13 @@ def _cache_full_catalog(course_type: str, requested_page: int, first_payload: di
     total_pages = max(1, (total_count + 9) // 10)
     all_courses: list[dict] = []
     for page in range(1, total_pages + 1):
+        if not _catalog_context_is_current(scope, context):
+            logger.info("Full catalog refresh cancelled because the session scope changed")
+            return
         if page == requested_page:
             content = first_payload
         else:
-            success, data, _ = query_courses(normalized_type, page - 1)
+            success, data, _ = query_courses(normalized_type, page - 1, context)
             if not success:
                 logger.info(
                     "Full %s catalog cache refresh stopped on page %s", normalized_type, page
@@ -1047,12 +1029,19 @@ def _cache_full_catalog(course_type: str, requested_page: int, first_payload: di
             return
         if not content["courses"]:
             return
+        if not _catalog_context_is_current(scope, context):
+            logger.info("Full catalog refresh discarded a page after the session scope changed")
+            return
+        put_course_cache(scope, normalized_type, page, 10, content)
         all_courses.extend(content["courses"])
 
     if len(all_courses) < total_count:
         logger.info("Full %s catalog cache refresh was incomplete", normalized_type)
         return
+    if not _catalog_context_is_current(scope, context):
+        return
     put_full_course_cache(
+        scope,
         normalized_type,
         {
             "total_count": total_count,
@@ -1064,31 +1053,51 @@ def _cache_full_catalog(course_type: str, requested_page: int, first_payload: di
 
 
 async def _run_full_catalog_cache_refresh(
+    scope: CatalogCacheScope,
+    context: CatalogRequestContext,
     course_type: str,
     requested_page: int,
     first_payload: dict,
 ) -> None:
     try:
-        await asyncio.to_thread(_cache_full_catalog, course_type, requested_page, first_payload)
+        await asyncio.to_thread(
+            _cache_full_catalog,
+            scope,
+            context,
+            course_type,
+            requested_page,
+            first_payload,
+        )
     except Exception:
         logger.exception("Full %s catalog cache refresh failed", course_type)
     finally:
         with _full_catalog_refresh_lock:
-            _full_catalog_refreshing.discard(course_type)
+            _full_catalog_refreshing.discard(f"{scope.digest}:{course_type}")
 
 
 def _schedule_full_catalog_cache_refresh(
+    scope: CatalogCacheScope,
+    context: CatalogRequestContext,
     course_type: str,
     requested_page: int,
     first_payload: dict,
 ) -> None:
     if course_type not in {"TJKC", "FANKC"}:
         return
+    refresh_key = f"{scope.digest}:{course_type}"
     with _full_catalog_refresh_lock:
-        if course_type in _full_catalog_refreshing:
+        if refresh_key in _full_catalog_refreshing:
             return
-        _full_catalog_refreshing.add(course_type)
-    asyncio.create_task(_run_full_catalog_cache_refresh(course_type, requested_page, first_payload))
+        _full_catalog_refreshing.add(refresh_key)
+    asyncio.create_task(
+        _run_full_catalog_cache_refresh(
+            scope,
+            context,
+            course_type,
+            requested_page,
+            first_payload,
+        )
+    )
 
 
 @app.get("/api/school/courses")
@@ -1119,17 +1128,21 @@ async def api_school_courses(
             retryable=False,
         )
 
+    snapshot = get_session_snapshot()
     if cache_mode:
-        cached = get_full_course_cache(normalized_type)
-        if cached is None:
-            cached = get_course_cache(normalized_type, page, page_size)
+        cached = _cached_catalog_for_request(snapshot, normalized_type, page, page_size)
         if cached is not None:
             return JSONResponse(content=cached, headers=get_no_cache_headers())
+        return _api_error(
+            404,
+            "当前终端学号、批次和校区下暂无可用的本地课程缓存",
+            "COURSE_CACHE_MISS",
+            retryable=False,
+        )
 
     if not config.token or not config.combined_cookie:
         return _not_logged_in_response()
 
-    snapshot = get_session_snapshot()
     phase = config.classify_elective_phase(str(snapshot["batch_name"]))
     if phase == config.PHASE_CLOSED:
         return _api_error(
@@ -1147,6 +1160,15 @@ async def api_school_courses(
             retryable=True,
             phase=phase,
         )
+    try:
+        cache_scope, request_context = _catalog_context()
+    except ValueError:
+        return _api_error(
+            409,
+            "当前账号、批次或校区信息不完整，请重新检查开放状态",
+            "CACHE_SCOPE_UNAVAILABLE",
+            retryable=True,
+        )
     # WebUI 对用户使用 1-based 页码；学校接口的 pageNumber 从 0 开始。
     school_page = page - 1
     try:
@@ -1154,6 +1176,7 @@ async def api_school_courses(
             query_courses,
             normalized_type,
             school_page,
+            request_context,
         )
         if not success and data == SESSION_EXPIRED:
             logger.info("Course query detected expiry; starting OCR recovery")
@@ -1169,23 +1192,50 @@ async def api_school_courses(
                     retryable=False,
                     requires_manual_login=True,
                 )
+            try:
+                cache_scope, request_context = _catalog_context()
+            except ValueError:
+                return _not_logged_in_response()
             success, data, _ = await asyncio.to_thread(
                 query_courses,
                 normalized_type,
                 school_page,
+                request_context,
             )
         if success:
             content = data.to_api_dict() if hasattr(data, "to_api_dict") else data
             if isinstance(content, dict):
-                put_course_cache(normalized_type, page, page_size, content)
-                if content.get("courses"):
-                    _schedule_full_catalog_cache_refresh(normalized_type, page, content)
-                content = annotate_live_course_cache(
-                    content,
+                if _catalog_context_is_current(cache_scope, request_context):
+                    put_course_cache(
+                        cache_scope,
+                        normalized_type,
+                        page,
+                        page_size,
+                        content,
+                    )
+                    if content.get("courses"):
+                        _schedule_full_catalog_cache_refresh(
+                            cache_scope,
+                            request_context,
+                            normalized_type,
+                            page,
+                            content,
+                        )
+                cached_page = get_course_cache(
+                    cache_scope,
                     normalized_type,
                     page,
                     page_size,
                 )
+                content = {
+                    **content,
+                    "cached": False,
+                    "has_cache": cached_page is not None,
+                    "cached_at": cached_page.get("cached_at") if cached_page else None,
+                    "cache_schema_version": (
+                        cached_page.get("cache_schema_version") if cached_page else None
+                    ),
+                }
             return JSONResponse(content=content, headers=get_no_cache_headers())
         failure_map = {
             COURSE_WINDOW_CLOSED: (
@@ -1320,13 +1370,30 @@ async def api_school_enrolled():
 
 @app.post("/api/courses/add")
 async def api_cart_add(cart: CartCourse):
-    if is_enroll_task_running():
-        return JSONResponse(
-            status_code=409,
-            content={"message": "抢课任务运行中，暂不能修改清单", "is_error": True},
+    result = add_cart_course(cart)
+    error_code = str(result.get("error_code", ""))
+    if not result["success"] and error_code.startswith("ENROLL_TASK_"):
+        return _api_error(
+            409,
+            str(result["message"]),
+            error_code,
+            retryable=error_code == "ENROLL_TASK_PAUSE_PENDING",
         )
-    result = cart_service.add_course(cart)
-    return ApiMessage(message=result["message"], is_error=not result["success"])
+    if not result["success"] and error_code == "COURSE_ALREADY_IN_CART":
+        return _api_error(
+            409,
+            str(result["message"]),
+            error_code,
+            retryable=False,
+        )
+    return JSONResponse(
+        content={
+            **result,
+            "is_error": not bool(result["success"]),
+            "progress": get_enroll_progress(),
+        },
+        headers=get_no_cache_headers(),
+    )
 
 
 @app.post("/api/courses/delete")
@@ -1359,13 +1426,19 @@ async def api_cart_retry(
     course_id: str = Query(alias="id", min_length=1, max_length=128),
 ):
     """Return an explicitly failed item to PENDING without duplicating it."""
-    if is_enroll_task_running():
-        return JSONResponse(
-            status_code=409,
-            content={"message": "抢课任务运行中，暂不能重新排队", "is_error": True},
+    result = retry_cart_course(course_id)
+    error_code = str(result.get("error_code", ""))
+    if not result["success"] and error_code.startswith("ENROLL_TASK_"):
+        return _api_error(
+            409,
+            str(result["message"]),
+            error_code,
+            retryable=error_code == "ENROLL_TASK_PAUSE_PENDING",
         )
-    result = cart_service.retry_failed_course(course_id)
-    return ApiMessage(message=result["message"], is_error=not result["success"])
+    return JSONResponse(
+        content={**result, "is_error": not bool(result["success"])},
+        headers=get_no_cache_headers(),
+    )
 
 
 @app.get("/api/courses/dblist")
@@ -1382,16 +1455,75 @@ async def api_cart_sorted() -> list[CartCourse]:
 
 
 @app.patch("/api/courses/{course_id}")
-async def api_cart_preferences(course_id: str, payload: dict):
-    if is_enroll_task_running():
-        return _api_error(409, "抢课任务运行中，暂不能修改清单", "TASK_RUNNING", retryable=False)
-    allowed = {"auto_enabled", "priority_group", "priority_rank"}
-    values = {key: payload[key] for key in allowed if key in payload}
-    if not values or not cart_service.update_course_preferences(course_id, **values):
+async def api_cart_preferences(course_id: str, payload: CartPreferencesRequest):
+    values = payload.model_dump(exclude_unset=True)
+    if not values or any(value is None for value in values.values()):
         return _api_error(
             400, "课程偏好无效或课程不存在", "INVALID_COURSE_PREFERENCE", retryable=False
         )
-    return {"success": True, "message": "课程偏好已更新"}
+    result = update_cart_course_preferences(course_id, **values)
+    error_code = str(result.get("error_code", ""))
+    if not result["success"] and error_code.startswith("ENROLL_TASK_"):
+        return _api_error(
+            409,
+            str(result["message"]),
+            error_code,
+            retryable=error_code == "ENROLL_TASK_PAUSE_PENDING",
+        )
+    if not result["success"]:
+        return _api_error(
+            400,
+            str(result["message"]),
+            error_code or "INVALID_COURSE_PREFERENCE",
+            retryable=False,
+        )
+    return JSONResponse(content=result, headers=get_no_cache_headers())
+
+
+@app.patch("/api/courses/priority/order")
+async def api_cart_priorities(payload: dict):
+    raw_updates = payload.get("updates") if isinstance(payload, dict) else None
+    if not isinstance(raw_updates, list) or not (1 <= len(raw_updates) <= 100):
+        return _api_error(
+            400,
+            "课程优先级列表无效",
+            "INVALID_COURSE_PRIORITIES",
+            retryable=False,
+        )
+    updates: list[tuple[str, int]] = []
+    try:
+        for item in raw_updates:
+            if not isinstance(item, dict):
+                raise ValueError
+            course_id = str(item.get("id") or "").strip()
+            rank = int(item.get("priority_rank"))
+            if not course_id or len(course_id) > 128 or rank < 0 or rank > 100000:
+                raise ValueError
+            updates.append((course_id, rank))
+    except (TypeError, ValueError):
+        return _api_error(
+            400,
+            "课程优先级列表无效",
+            "INVALID_COURSE_PRIORITIES",
+            retryable=False,
+        )
+    result = update_cart_course_priorities(updates)
+    error_code = str(result.get("error_code", ""))
+    if not result["success"] and error_code.startswith("ENROLL_TASK_"):
+        return _api_error(
+            409,
+            str(result["message"]),
+            error_code,
+            retryable=error_code == "ENROLL_TASK_PAUSE_PENDING",
+        )
+    if not result["success"]:
+        return _api_error(
+            400,
+            str(result["message"]),
+            error_code or "INVALID_COURSE_PRIORITIES",
+            retryable=False,
+        )
+    return JSONResponse(content=result, headers=get_no_cache_headers())
 
 
 @app.post("/api/enroll/courses")
@@ -1498,12 +1630,6 @@ async def api_enroll_settings():
 async def api_update_enroll_settings(request: EnrollmentSettingsRequest):
     values = request.model_dump(exclude_none=True)
     mode = values.pop("mode", None)
-    if "swap_enabled" in values:
-        values["switch_enabled"] = values.pop("swap_enabled")
-    if "swap_confirmed" in values:
-        values["switch_confirmed"] = values.pop("swap_confirmed")
-    if "swap_threshold" in values:
-        values["switch_threshold"] = values.pop("swap_threshold")
     try:
         settings = update_enroll_settings(**values)
         if mode:
@@ -1706,23 +1832,45 @@ def _safe_static_file(relative_path: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+@app.post("/api/school/open")
+async def api_open_official_school_page():
+    """Open the public school entry without exposing local session secrets."""
+    try:
+        opened = await asyncio.to_thread(webbrowser.open_new_tab, OFFICIAL_SCHOOL_HOME_URL)
+    except Exception as exc:
+        logger.warning("Unable to open official school page: %s", exc)
+        opened = False
+    if not opened:
+        return _api_error(
+            503,
+            "系统浏览器未能自动打开，请手动访问深圳大学本科选课系统",
+            "BROWSER_OPEN_FAILED",
+            retryable=True,
+            url=OFFICIAL_SCHOOL_HOME_URL,
+        )
+    return JSONResponse(
+        content={
+            "message": "已在系统浏览器打开学校官方选课页面",
+            "is_error": False,
+            "url": OFFICIAL_SCHOOL_HOME_URL,
+        },
+        headers=get_no_cache_headers(),
+    )
+
+
 @app.api_route(
-    "/proxy/{school_host}/{school_path:path}",
-    methods=["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+    "/proxy/{school_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     include_in_schema=False,
 )
-async def api_school_proxy(school_host: str, school_path: str, request: Request):
-    """Reverse-proxy arbitrary ``bkxk.szu.edu.cn`` pages through the shared session.
-
-    The browser never performs its own school login here; every request reuses
-    the server-side ``config.combined_cookie``/``config.token`` established by
-    the API-mode login, so switching between the API workbench and the proxied
-    school page never logs the session out (the school kicks all previous
-    sessions on a fresh login).
-    """
-    if school_host.lower() != SCHOOL_HOST:
-        raise HTTPException(status_code=404, detail="不支持的代理目标")
-    return await proxy_request(request, school_path)
+async def disabled_school_proxy(school_path: str):
+    """Make the rejected same-origin proxy design explicitly unreachable."""
+    return _api_error(
+        410,
+        "学校同源代理已停用；请使用只读 API 或在系统浏览器打开学校官网",
+        "SCHOOL_PROXY_DISABLED",
+        retryable=False,
+    )
 
 
 @app.get("/{full_path:path}")
@@ -1753,7 +1901,7 @@ KEEP_ALIVE_INTERVAL_SECONDS = 60
 
 
 def _keep_alive_once() -> None:
-    """Touch one authenticated school API so its cookies remain active."""
+    """Refresh the batch through the single session coordinator."""
     snapshot = get_session_snapshot()
     if not snapshot["logged_in"] or not snapshot["student_id"]:
         if automatic_relogin_available():
@@ -1764,55 +1912,20 @@ def _keep_alive_once() -> None:
         return
     student_id = str(snapshot["student_id"])
     token = str(config.token)
-    restored_session = restored_session_validation_pending()
     try:
-        # Rotate the read-only authenticated endpoint so idle keep-alive does
-        # not repeatedly depend on the batch endpoint alone.
-        keep_alive_call = random.choice(
-            (
-                lambda: refresh_elective_batch(student_id, token),
-                lambda: get_enrolled_courses(),
-                lambda: query_courses("TJKC", 0),
-            )
-        )
-        try:
-            result = keep_alive_call()
-            _raise_if_session_expired_result(result)
-        except logic.SchoolBatchSessionExpiredError:
-            raise
-        except Exception:
-            # A temporary failure of an optional read endpoint must not stop
-            # the canonical batch request from keeping the session alive.
-            result = refresh_elective_batch(student_id, token)
-            _raise_if_session_expired_result(result)
-        if restored_session:
-            consume_restored_session_validation()
+        refresh_elective_batch(student_id, token)
         logger.info("Keep-alive: school session refreshed")
     except logic.SchoolBatchSessionExpiredError:
-        if restored_session:
-            invalidate_school_session()
         logger.info("Keep-alive: session expired; starting OCR recovery")
         recovered, error = attempt_automatic_relogin(config.ocr_relogin_max_attempts)
         if not recovered:
             logger.warning("Keep-alive OCR recovery failed: %s", error)
     except logic.ElectiveBatchUnavailableError as exc:
-        if restored_session:
-            consume_restored_session_validation()
         logger.info("Keep-alive: school session alive but no batch: %s", exc)
     except (requests.Timeout, requests.RequestException) as exc:
         logger.info("Keep-alive network issue (session unaffected): %s", exc)
     except Exception as exc:
         logger.warning("Keep-alive unexpected failure: %s", exc)
-
-
-def _keep_alive_loop() -> None:
-    """Run periodic session refresh on a daemon thread until the process exits."""
-    while True:
-        try:
-            _keep_alive_once()
-        except Exception as exc:
-            logger.warning("Keep-alive loop error: %s", exc)
-        threading.Event().wait(KEEP_ALIVE_INTERVAL_SECONDS)
 
 
 def start_server() -> None:

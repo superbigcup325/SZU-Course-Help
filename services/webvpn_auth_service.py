@@ -1,12 +1,4 @@
-"""Controlled-browser WebVPN authentication.
-
-The WebVPN CAS page is intentionally opened on its real origin.  The local
-reverse proxy is useful for school pages, but it is a poor fit for the CAS
-login page because the page contains origin-sensitive JavaScript and QR-code
-polling.  A short-lived browser profile keeps that flow isolated while the
-Chrome DevTools Protocol lets the local server import only the three cookies
-needed by the WebVPN backend.
-"""
+"""Ephemeral controlled-browser authentication for read-only WebVPN fallback."""
 
 from __future__ import annotations
 
@@ -21,15 +13,16 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
-import config
-from project_paths import data_dir
 from services import auth_service, backend_service
 
 logger = logging.getLogger(__name__)
@@ -57,6 +50,34 @@ def build_auth_url(target_path: str = "/xsxkapp/sys/xsxkapp/*default/index.do") 
     )
 
 
+def _known_browser_paths(
+    platform_name: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return conventional Chromium-family install locations for one platform."""
+    current_platform = platform_name or sys.platform
+    env = environment or os.environ
+    if current_platform == "darwin":
+        return (
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        )
+    if current_platform.startswith("win"):
+        roots = tuple(
+            value
+            for key in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA")
+            if (value := str(env.get(key, "")).strip())
+        )
+        suffixes = (
+            Path("Google/Chrome/Application/chrome.exe"),
+            Path("Microsoft/Edge/Application/msedge.exe"),
+            Path("Chromium/Application/chrome.exe"),
+        )
+        return tuple(str(Path(root) / suffix) for root in roots for suffix in suffixes)
+    return ()
+
+
 def find_browser() -> str | None:
     """Return a Chromium-family executable, honoring an explicit override."""
     configured = str(os.getenv("COURSE_SELECT_BROWSER", "")).strip()
@@ -71,13 +92,18 @@ def find_browser() -> str | None:
             "microsoft-edge-stable",
         )
     )
+    candidates.extend(_known_browser_paths())
     for candidate in candidates:
         if not candidate:
             continue
         executable = shutil.which(candidate)
         if executable:
             return executable
-        if os.path.isabs(candidate) and os.access(candidate, os.X_OK):
+        if (
+            os.path.isabs(candidate)
+            and Path(candidate).is_file()
+            and (os.name == "nt" or os.access(candidate, os.X_OK))
+        ):
             return candidate
     return None
 
@@ -268,8 +294,7 @@ class ControlledBrowserManager:
                 self._state = "error"
                 self._message = "未找到 Chromium、Chrome 或 Edge，请安装浏览器后重试"
                 raise ControlledBrowserUnavailableError(self._message)
-            self._profile_dir = str(data_dir() / "webvpn-browser-profile")
-            os.makedirs(self._profile_dir, exist_ok=True)
+            self._profile_dir = tempfile.mkdtemp(prefix="szu-course-webvpn-")
             self._debug_port = _free_local_port()
             self._auth_url = build_auth_url(target_path or "/xsxkapp/sys/xsxkapp/*default/index.do")
             args = self._browser_args(executable, self._auth_url)
@@ -281,7 +306,7 @@ class ControlledBrowserManager:
                     stderr=subprocess.DEVNULL,
                 )
             except (OSError, ValueError) as exc:
-                self._forget_dead_browser()
+                self.stop_browser()
                 self._state = "error"
                 self._message = f"受控浏览器启动失败：{exc}"
                 raise ControlledBrowserUnavailableError(self._message) from exc
@@ -299,84 +324,10 @@ class ControlledBrowserManager:
             f"--remote-debugging-port={self._debug_port}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-mode",
             "--new-window",
             url,
         ]
-
-    @staticmethod
-    def _page_websocket(targets: list[dict[str, Any]]) -> str:
-        for target in targets:
-            websocket_url = str(target.get("webSocketDebuggerUrl", ""))
-            if target.get("type") == "page" and websocket_url:
-                return websocket_url
-        return ""
-
-    @staticmethod
-    def _saved_browser_cookies() -> list[dict[str, Any]]:
-        """Convert the server-authoritative cookies into CDP cookie records."""
-        values = {}
-        values.update(backend_service.parse_cookie_pairs(getattr(config, "combined_cookie", "")))
-        values.update(backend_service.parse_cookie_pairs(getattr(config, "webvpn_cookie", "")))
-        return [
-            {
-                "name": name,
-                "value": value,
-                # The school session is host-scoped to the WebVPN-routed
-                # course system. The three gateway cookies are shared by the
-                # WebVPN subdomains and must therefore use the parent domain.
-                "domain": (
-                    f".{backend_service.WEBVPN_ROOT_HOST}"
-                    if name in backend_service.WEBVPN_COOKIE_NAMES
-                    else backend_service.WEBVPN_HOST
-                ),
-                "path": "/xsxkapp/" if name == "_WEU" else "/",
-                "sameSite": "None" if name == "_WEU" else "Lax",
-                "secure": True,
-            }
-            for name, value in values.items()
-            if value
-        ]
-
-    def _inject_cookies_and_navigate(self, url: str) -> None:
-        """Inject shared cookies first, then navigate a WebVPN tab."""
-        deadline = time.monotonic() + CDP_STARTUP_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            try:
-                targets = _read_http_json(f"http://127.0.0.1:{self._debug_port}/json/list")
-            except (OSError, ValueError, KeyError, urllib.error.URLError):
-                time.sleep(0.1)
-                continue
-            websocket_url = self._page_websocket(targets)
-            if websocket_url:
-                saved = self._saved_browser_cookies()
-                expected = {cookie["name"]: (cookie["value"], cookie["domain"]) for cookie in saved}
-                _cdp_command(
-                    websocket_url,
-                    "Network.setCookies",
-                    {"cookies": saved},
-                )
-                current = _cdp_command(websocket_url, "Network.getAllCookies")
-                actual = {
-                    str(cookie.get("name")): (
-                        str(cookie.get("value")),
-                        str(cookie.get("domain", "")),
-                    )
-                    for cookie in current.get("cookies", [])
-                    if str(cookie.get("name")) in expected
-                }
-                missing = [
-                    name
-                    for name, expected_value in expected.items()
-                    if actual.get(name) != expected_value
-                ]
-                if missing:
-                    raise ControlledBrowserUnavailableError(
-                        "受控浏览器未接受选课/WebVPN Cookie：" + ",".join(missing)
-                    )
-                _cdp_command(websocket_url, "Page.navigate", {"url": url})
-                return
-            time.sleep(0.1)
-        raise ControlledBrowserUnavailableError("受控浏览器 DevTools 尚未就绪")
 
     def _start_watcher(self) -> None:
         self._worker = threading.Thread(
@@ -399,79 +350,6 @@ class ControlledBrowserManager:
     def _forget_dead_browser(self) -> None:
         self._process = None
         self._debug_port = 0
-
-    def open_controlled_url(self, url: str) -> dict[str, Any]:
-        """Open the real WebVPN page in the persistent controlled browser."""
-        with self._lock:
-            if self._browser_alive():
-                self._inject_cookies_and_navigate(url)
-                return {**self.status(), "state": "opened", "opened_url": url}
-            self._forget_dead_browser()
-            executable = find_browser()
-            if not executable:
-                raise ControlledBrowserUnavailableError(
-                    "未找到 Chromium、Chrome 或 Edge，请安装浏览器后重试"
-                )
-            self._profile_dir = str(data_dir() / "webvpn-browser-profile")
-            os.makedirs(self._profile_dir, exist_ok=True)
-            self._debug_port = _free_local_port()
-            self._auth_url = self._auth_url or build_auth_url()
-            try:
-                self._process = subprocess.Popen(
-                    self._browser_args(executable, "about:blank"),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except (OSError, ValueError) as exc:
-                self._forget_dead_browser()
-                raise ControlledBrowserUnavailableError(f"受控浏览器启动失败：{exc}") from exc
-            try:
-                self._inject_cookies_and_navigate(url)
-            except ControlledBrowserUnavailableError:
-                self.stop_browser()
-                raise
-            self._state = "opened"
-            self._message = "已在持久化受控浏览器中打开学校原始页面"
-            self._started_at = time.monotonic()
-            return self.status() | {"state": "opened", "opened_url": url}
-
-    def clear_proxy_cookies(self) -> None:
-        """Clear only local proxy mirrors, preserving the persistent CAS state."""
-        with self._lock:
-            if not self._browser_alive():
-                return
-            try:
-                targets = _read_http_json(f"http://127.0.0.1:{self._debug_port}/json/list")
-                cookies = self._read_cookies(targets)
-                proxy_names = set(backend_service.SCHOOL_COOKIE_NAMES) | set(
-                    backend_service.WEBVPN_COOKIE_NAMES
-                )
-                for cookie in cookies:
-                    domain = str(cookie.get("domain", "")).lstrip(".").lower()
-                    name = str(cookie.get("name", ""))
-                    if domain not in {"127.0.0.1", "localhost"} or name not in proxy_names:
-                        continue
-                    websocket_url = next(
-                        (
-                            str(target.get("webSocketDebuggerUrl", ""))
-                            for target in targets
-                            if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
-                        ),
-                        "",
-                    )
-                    if websocket_url:
-                        _cdp_command(
-                            websocket_url,
-                            "Network.deleteCookies",
-                            {
-                                "name": name,
-                                "domain": cookie.get("domain"),
-                                "path": cookie.get("path", "/"),
-                            },
-                        )
-            except (OSError, ValueError, KeyError, RuntimeError, urllib.error.URLError):
-                logger.debug("Unable to clear controlled-browser proxy cookies", exc_info=True)
 
     def _watch(self) -> None:
         deadline = time.monotonic() + AUTH_TIMEOUT_SECONDS
@@ -514,8 +392,7 @@ class ControlledBrowserManager:
         with self._lock:
             self._state = "authenticated"
             self._message = "WebVPN 认证完成，Cookie 已安全导入"
-        # Close the authentication window after importing the cookies, but
-        # retain the profile directory for the next controlled-browser page.
+        # Close the authentication window and erase its temporary profile.
         self.stop_browser()
 
     def _set_error(self, message: str) -> None:
@@ -529,6 +406,7 @@ class ControlledBrowserManager:
         with self._lock:
             process, self._process = self._process, None
             self._debug_port = 0
+            profile_dir, self._profile_dir = self._profile_dir, ""
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
@@ -536,6 +414,18 @@ class ControlledBrowserManager:
             except (OSError, subprocess.TimeoutExpired):
                 with contextlib.suppress(OSError):
                     process.kill()
+        if profile_dir:
+            for attempt in range(4):
+                try:
+                    shutil.rmtree(profile_dir)
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    if attempt == 3:
+                        logger.warning("Could not erase temporary WebVPN browser profile")
+                    else:
+                        time.sleep(0.15 * (attempt + 1))
 
     def close(self) -> dict[str, Any]:
         self.stop_browser()
@@ -578,11 +468,3 @@ def get_status() -> dict[str, Any]:
 
 def close_auth() -> dict[str, Any]:
     return manager.close()
-
-
-def open_controlled_url(url: str) -> dict[str, Any]:
-    return manager.open_controlled_url(url)
-
-
-def clear_proxy_cookies() -> None:
-    manager.clear_proxy_cookies()

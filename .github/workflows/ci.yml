@@ -48,6 +48,8 @@ jobs:
         run: |
           node --check static_dist/login.js
           node --check static_dist/course-app.js
+          node --check static_dist/offline.js
+          node --check static_dist/schedule-parser.js
 
       - name: Run tests
         run: python -m pytest -q

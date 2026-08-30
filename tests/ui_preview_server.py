@@ -90,7 +90,7 @@ PREVIEW_MATCH_NAMES = ["数据结构", "数据库系统", "大数据分析"]
 PREVIEW_OTHER_NAMES = ["设计思维", "城市规划", "音乐鉴赏", "现代文学"]
 
 
-def fake_query_courses(course_type: str, page: int):
+def fake_query_courses(course_type: str, page: int, _context=None):
     names = {
         "TJKC": "本班推荐",
         "FANKC": "方案内课程",
@@ -263,6 +263,7 @@ _preview_task_state = {
     "paused_at": "2026-08-28T14:28:25+08:00" if PREVIEW_TASK == "paused" else "",
     "stopping": False,
     "stopping_reason": "",
+    "queue_revision": 1,
 }
 _original_get_session_snapshot = app.get_session_snapshot
 

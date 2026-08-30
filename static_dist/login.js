@@ -2,122 +2,6 @@
 
 const REQUEST_TIMEOUT_MS = 30000;
 const CAPTCHA_IMAGE_TIMEOUT_MS = 8000;
-const CREDENTIALS_STORAGE_KEY = "szu.loginCredentials.v1";
-const SESSION_CREDENTIALS_STORAGE_KEY = "szu.loginSessionCredentials.v1";
-
-/* ------------------------------------------------------------------
-   Password obfuscation via Web Crypto AES-GCM.
-   The key is derived (PBKDF2) from the origin + student number so the
-   stored blob is not plaintext and cannot be trivially replayed on another
-   origin.  This is browser-local protection, not a substitute for OS-level
-   credential stores.
-   ------------------------------------------------------------------ */
-
-function _b64encode(bytes) {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-
-function _b64decode(str) {
-  const binary = atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
-
-async function _deriveKey(studentId) {
-  const enc = new TextEncoder();
-  const baseKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(`${window.location.origin}|${studentId}`),
-    { name: "PBKDF2" },
-    false,
-    ["deriveKey"],
-  );
-  return crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: enc.encode("szu-course-help/salt-v1"),
-      iterations: 100000,
-      hash: "SHA-256",
-    },
-    baseKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"],
-  );
-}
-
-async function _encryptPassword(studentId, password) {
-  const key = await _deriveKey(studentId);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const enc = new TextEncoder();
-  const cipherBuf = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    enc.encode(password),
-  );
-  return `${_b64encode(iv)}.${_b64encode(new Uint8Array(cipherBuf))}`;
-}
-
-async function _decryptPassword(studentId, blob) {
-  const [ivPart, dataPart] = String(blob).split(".");
-  if (!ivPart || !dataPart) return "";
-  const key = await _deriveKey(studentId);
-  const iv = _b64decode(ivPart);
-  const data = _b64decode(dataPart);
-  const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
-  return new TextDecoder().decode(plainBuf);
-}
-
-async function loadSavedCredentials() {
-  try {
-    const raw = localStorage.getItem(CREDENTIALS_STORAGE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== "object") return null;
-    const studentId = typeof data.student_id === "string" ? data.student_id : "";
-    const blob = typeof data.blob === "string" ? data.blob : "";
-    if (!studentId || !blob) return null;
-    const password = await _decryptPassword(studentId, blob);
-    return { student_id: studentId, password };
-  } catch {
-    return null;
-  }
-}
-
-async function saveCredentials(studentId, password) {
-  try {
-    const blob = await _encryptPassword(studentId, password);
-    localStorage.setItem(
-      CREDENTIALS_STORAGE_KEY,
-      JSON.stringify({ student_id: studentId, blob }),
-    );
-  } catch {
-    /* crypto / localStorage 不可用时静默忽略 */
-  }
-}
-
-async function saveSessionCredentials(studentId, password, backend) {
-  try {
-    const blob = await _encryptPassword(studentId, password);
-    window.sessionStorage.setItem(
-      SESSION_CREDENTIALS_STORAGE_KEY,
-      JSON.stringify({ student_id: studentId, backend, blob }),
-    );
-  } catch {
-    /* 当前浏览器不支持会话存储时，不阻断正常登录。 */
-  }
-}
-
-function clearSavedCredentials() {
-  try {
-    localStorage.removeItem(CREDENTIALS_STORAGE_KEY);
-  } catch {
-    /* localStorage 不可用时静默忽略 */
-  }
-}
 
 class ApiError extends Error {
   constructor(message, { status = 0, code = "UNKNOWN_ERROR", retryable = false } = {}) {
@@ -138,6 +22,8 @@ const loginState = {
   solvingCaptcha: false,
   submitting: false,
   backend: "auto",
+  prefilledStudentId: "",
+  cardKey: "",
   webvpnAuthTimer: 0,
   webvpnAuthRequested: false,
 };
@@ -147,7 +33,6 @@ const loginElements = {
   studentId: document.querySelector("#studentId"),
   password: document.querySelector("#password"),
   passwordToggle: document.querySelector("#passwordToggle"),
-  rememberCredentials: document.querySelector("#rememberCredentials"),
   phaseNotice: document.querySelector("#phaseNotice"),
   stage: document.querySelector("#captchaStage"),
   image: document.querySelector("#captchaImage"),
@@ -255,15 +140,17 @@ function isValidStudentId(value) {
   return /^\d{6,12}$/.test(String(value || "").trim());
 }
 
-async function fetchCardKeyForStudent(studentId) {
-  const result = await requestJson("/api/card_key", {
-    method: "POST",
-    body: JSON.stringify({ student_id: studentId }),
-  });
-  if (!result || typeof result.card_key !== "string" || !result.card_key.startsWith("SZU3.")) {
-    throw new ApiError("本地卡密生成失败，请稍后重试", { code: "CARD_KEY_INVALID_RESPONSE" });
+function prefilledCardKeyForStudent(studentId) {
+  if (
+    studentId !== loginState.prefilledStudentId
+    || typeof loginState.cardKey !== "string"
+    || !loginState.cardKey.startsWith("SZU3.")
+  ) {
+    throw new ApiError("学号与终端生成的卡密不一致，请重新启动程序并输入该学号", {
+      code: "CARD_KEY_STUDENT_MISMATCH",
+    });
   }
-  return result.card_key;
+  return loginState.cardKey;
 }
 
 
@@ -682,7 +569,7 @@ async function submitLogin(event) {
   setLoginMessage("正在连接学校选课系统...", true);
 
   try {
-    const cardKey = await fetchCardKeyForStudent(studentId);
+    const cardKey = prefilledCardKeyForStudent(studentId);
     const result = await requestJson("/api/login", {
       method: "POST",
       body: JSON.stringify({
@@ -695,12 +582,6 @@ async function submitLogin(event) {
         backend: loginState.backend,
       }),
     });
-    if (loginElements.rememberCredentials.checked) {
-      await saveCredentials(studentId, password);
-    } else {
-      clearSavedCredentials();
-    }
-    await saveSessionCredentials(studentId, password, loginState.backend);
     setLoginMessage(result.message || "登录成功", true);
     window.location.assign(cleanPagePath("/"));
   } catch (error) {
@@ -735,14 +616,10 @@ async function initializeLogin() {
       return;
     }
     loginElements.studentId.value = bootstrap.student_id || "";
+    loginState.prefilledStudentId = bootstrap.student_id || "";
+    loginState.cardKey = bootstrap.card_key || "";
     if (bootstrap.phase_notice) {
       loginElements.phaseNotice.textContent = bootstrap.phase_notice;
-    }
-    const saved = await loadSavedCredentials();
-    if (saved) {
-      if (!loginElements.studentId.value) loginElements.studentId.value = saved.student_id;
-      loginElements.password.value = saved.password;
-      loginElements.rememberCredentials.checked = true;
     }
   } catch (error) {
     setLoginMessage(error instanceof Error ? error.message : "本地登录信息加载失败");

@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>登录 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260829.2">
+  <link rel="stylesheet" href="/styles.css?build=20260831.1">
 </head>
 <body class="login-page">
   <section class="login-visual" aria-label="深大抢课助手">
@@ -46,17 +46,12 @@
           </span>
         </label>
 
-        <label class="remember-row">
-          <input id="rememberCredentials" type="checkbox">
-          <span>记住账号密码（仅保存在本浏览器）</span>
-        </label>
-
         <fieldset class="backend-fieldset">
           <legend>访问后端</legend>
           <div class="backend-options">
             <label class="backend-option">
               <input type="radio" name="backend" value="auto" checked>
-              <span><strong>自动</strong><small>优先主站，故障时切换 WebVPN</small></span>
+              <span><strong>自动</strong><small>主站优先，只读查询可回退 WebVPN</small></span>
             </label>
             <label class="backend-option">
               <input type="radio" name="backend" value="primary">
@@ -64,7 +59,7 @@
             </label>
             <label class="backend-option">
               <input type="radio" name="backend" value="webvpn">
-              <span><strong>WebVPN</strong><small>使用统一认证后的备用入口</small></span>
+              <span><strong>WebVPN</strong><small>统一认证后的只读备用入口</small></span>
             </label>
           </div>
           <div id="backendStatus" class="backend-status" role="status" aria-live="polite">当前后端：自动（优先主站）</div>
@@ -107,11 +102,11 @@
       </a>
       <p class="offline-note">无需登录即可查阅曾经加载过的课程和本地选课清单。</p>
 
-      <p class="privacy-note">勾选"记住账号密码"后，学号以明文、密码经本机 AES-GCM 加密后保存在本浏览器本地，下次自动解密填充；不勾选则仅保存在本次进程内存中，用于会话过期后的 OCR 自动重登录。</p>
+      <p class="privacy-note">密码、学校 Cookie 与登录令牌只保存在当前 Python 进程内存中；关闭程序后会立即失效，不会写入浏览器或磁盘。</p>
     </div>
   </main>
 
   <noscript>此页面需要启用 JavaScript。</noscript>
-  <script src="/login.js?build=20260829.2" defer></script>
+  <script src="/login.js?build=20260831.1" defer></script>
 </body>
 </html>

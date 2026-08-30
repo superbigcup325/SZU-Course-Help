@@ -48,6 +48,25 @@ def time_signature(value: Any) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def priority_group_key(
+    *,
+    explicit_group: Any = "",
+    course_number: Any = "",
+    schedule_signature: Any = "",
+    course_id: Any = "",
+) -> str:
+    """Return one stable local grouping key for queue ordering only."""
+    explicit = _as_string(explicit_group).strip()
+    if explicit:
+        return explicit
+    parts = [
+        _as_string(course_number).strip(),
+        _as_string(schedule_signature).strip(),
+    ]
+    fallback = "|".join(part for part in parts if part)
+    return fallback or "未分组课程"
+
+
 @dataclass(frozen=True, slots=True)
 class TeachingClass:
     """One teaching-class option nested under a school course."""

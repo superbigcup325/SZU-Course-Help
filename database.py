@@ -13,6 +13,7 @@ from typing import Protocol
 from weakref import WeakSet
 
 from campus import DEFAULT_CAMPUS_CODE, get_campus
+from course_models import priority_group_key
 from project_paths import data_dir
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,43 @@ class DatabaseManager:
             for name, statement in migrations.items():
                 if name not in columns:
                     connection.execute(statement)
+            self._normalize_priority_rows_locked(connection)
             connection.commit()
+
+    @staticmethod
+    def _normalize_priority_rows_locked(connection: sqlite3.Connection) -> None:
+        """Backfill group keys and dense per-group ranks for old databases."""
+        rows = connection.execute(
+            """
+            SELECT id, priority_group, priority_rank, course_number,
+                   time_signature, created_at
+            FROM courses
+            """
+        ).fetchall()
+        grouped: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            group = priority_group_key(
+                explicit_group=row["priority_group"],
+                course_number=row["course_number"],
+                schedule_signature=row["time_signature"],
+                course_id=row["id"],
+            )
+            grouped.setdefault(group, []).append(row)
+        for group, group_rows in grouped.items():
+            ordered = sorted(
+                group_rows,
+                key=lambda row: (
+                    max(0, int(row["priority_rank"] or 0)),
+                    str(row["created_at"] or ""),
+                    str(row["id"]),
+                ),
+            )
+            for rank, row in enumerate(ordered):
+                if row["priority_group"] != group or int(row["priority_rank"] or 0) != rank:
+                    connection.execute(
+                        "UPDATE courses SET priority_group = ?, priority_rank = ? WHERE id = ?",
+                        (group, rank, row["id"]),
+                    )
 
     def add_course(self, course: CartCourse) -> bool:
         """Insert or refresh one course and reset it to ``PENDING``."""
@@ -168,12 +205,27 @@ class DatabaseManager:
             teacher_name = str(getattr(course, "teacher_name", "") or "")
             credit = str(getattr(course, "credit", "") or "")
             auto_enabled = 1 if getattr(course, "auto_enabled", True) else 0
-            priority_group = str(getattr(course, "priority_group", "") or "")
-            priority_rank = int(getattr(course, "priority_rank", 0) or 0)
             course_number = str(getattr(course, "course_number", "") or "")
             time_signature = str(getattr(course, "time_signature", "") or "")
+            priority_group = priority_group_key(
+                explicit_group=getattr(course, "priority_group", ""),
+                course_number=course_number,
+                schedule_signature=time_signature,
+                course_id=course.id,
+            )
             with self._lock:
                 connection = self._connect()
+                existing = connection.execute(
+                    "SELECT priority_rank FROM courses WHERE id = ?", (course.id,)
+                ).fetchone()
+                if existing is not None:
+                    priority_rank = max(0, int(existing["priority_rank"] or 0))
+                else:
+                    row = connection.execute(
+                        "SELECT MAX(priority_rank) AS max_rank FROM courses WHERE priority_group = ?",
+                        (priority_group,),
+                    ).fetchone()
+                    priority_rank = int(row["max_rank"]) + 1 if row["max_rank"] is not None else 0
                 connection.execute(
                     """
                     INSERT INTO courses (
@@ -283,22 +335,90 @@ class DatabaseManager:
                 values["priority_rank"] = int(values["priority_rank"])
             except (TypeError, ValueError):
                 return False
-            if values["priority_rank"] < 0:
+            if not 0 <= values["priority_rank"] <= 100000:
                 return False
         if "priority_group" in values:
             values["priority_group"] = str(values["priority_group"] or "").strip()
+            if len(values["priority_group"]) > 256:
+                return False
         try:
-            assignments = ", ".join(f"{key} = ?" for key in values)
             with self._lock:
                 connection = self._connect()
+                current = connection.execute(
+                    """
+                    SELECT id, priority_group, priority_rank, course_number, time_signature
+                    FROM courses WHERE id = ?
+                    """,
+                    (course_id,),
+                ).fetchone()
+                if current is None:
+                    return False
+                if "priority_group" in values:
+                    target_group = priority_group_key(
+                        explicit_group=values["priority_group"],
+                        course_number=current["course_number"],
+                        schedule_signature=current["time_signature"],
+                        course_id=current["id"],
+                    )
+                    values["priority_group"] = target_group
+                    if target_group != current["priority_group"] and "priority_rank" not in values:
+                        row = connection.execute(
+                            """
+                            SELECT MAX(priority_rank) AS max_rank
+                            FROM courses WHERE priority_group = ? AND id != ?
+                            """,
+                            (target_group, course_id),
+                        ).fetchone()
+                        values["priority_rank"] = (
+                            int(row["max_rank"]) + 1 if row["max_rank"] is not None else 0
+                        )
+                assignments = ", ".join(f"{key} = ?" for key in values)
                 cursor = connection.execute(
                     f"UPDATE courses SET {assignments}, updated_at = ? WHERE id = ?",
                     (*values.values(), datetime.now().isoformat(timespec="seconds"), course_id),
                 )
+                self._normalize_priority_rows_locked(connection)
                 connection.commit()
             return cursor.rowcount > 0
         except sqlite3.Error:
             logger.exception("Failed to update course preferences")
+            return False
+
+    def update_course_priorities(self, updates: list[tuple[str, int]]) -> bool:
+        """Atomically update several ranks so resume cannot observe a half-swap."""
+        normalized: list[tuple[str, int]] = []
+        seen: set[str] = set()
+        for course_id, rank in updates:
+            normalized_id = str(course_id or "").strip()
+            try:
+                normalized_rank = int(rank)
+            except (TypeError, ValueError):
+                return False
+            if not normalized_id or normalized_id in seen or not 0 <= normalized_rank <= 100000:
+                return False
+            seen.add(normalized_id)
+            normalized.append((normalized_id, normalized_rank))
+        if not normalized:
+            return False
+        try:
+            with self._lock:
+                connection = self._connect()
+                connection.execute("BEGIN IMMEDIATE")
+                for course_id, rank in normalized:
+                    cursor = connection.execute(
+                        "UPDATE courses SET priority_rank = ?, updated_at = ? WHERE id = ?",
+                        (rank, datetime.now().isoformat(timespec="seconds"), course_id),
+                    )
+                    if cursor.rowcount != 1:
+                        connection.rollback()
+                        return False
+                self._normalize_priority_rows_locked(connection)
+                connection.commit()
+            return True
+        except sqlite3.Error:
+            with suppress(sqlite3.Error):
+                self._connect().rollback()
+            logger.exception("Failed to update course priorities")
             return False
 
     def get_all_courses(self) -> list[dict]:

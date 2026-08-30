@@ -17,7 +17,6 @@ import json
 import os
 import re
 import secrets
-import sys
 import tempfile
 import threading
 import time
@@ -26,6 +25,8 @@ from typing import Any
 
 from Crypto.PublicKey import ECC
 from Crypto.Signature import eddsa
+
+from project_paths import key_dir
 
 CARDKEY_VERSION = 3
 TOKEN_PREFIX = "SZU3"
@@ -39,12 +40,7 @@ class KeyManagementError(RuntimeError):
 
 
 def _key_dir() -> Path:
-    configured = os.getenv("COURSE_SELECT_KEY_DIR", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
+    return key_dir()
 
 
 def _private_key_path() -> Path:

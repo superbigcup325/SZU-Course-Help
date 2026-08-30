@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 import config
 from campus import DEFAULT_CAMPUS_CODE, normalize_campus_code
@@ -20,44 +17,8 @@ REQUEST_TIMEOUT = (5, 20)
 logger = logging.getLogger(__name__)
 
 
-def _build_session() -> requests.Session:
-    """Create a session with connection pooling and transport-layer retries.
-
-    Only connection-level and transient HTTP failures are retried here; the
-    school's business payload (success / capacity full / terminal) is still
-    classified by the caller in ``services.enroll_service``.
-    """
-    session = requests.Session()
-    retry = Retry(
-        total=2,
-        connect=2,
-        read=2,
-        backoff_factor=0.3,
-        status_forcelist=(502, 503, 504),
-        allowed_methods=frozenset(("GET", "POST")),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
-
-
-_session = _build_session()
-
-# Keep the module-level request seam used by older integrations and tests while
-# retaining a replaceable session seam for withdrawal callers.
-_session.post = lambda **kwargs: requests.post(**kwargs)
-
-
 class SchoolSessionExpiredError(RuntimeError):
     """Raised when the school responds with an expired-session signal."""
-
-
-def _request_headers(combined_cookie: str, token: str) -> dict[str, str]:
-    return backend_service.build_headers(
-        backend_service.active_profile(), token=token, cookie=combined_cookie
-    )
 
 
 def _school_request(
@@ -67,12 +28,12 @@ def _school_request(
     params=None,
     token: str = "",
     cookie: str | None = None,
-    request_sender=None,
+    read_only: bool = False,
 ):
     def sender(**kwargs):
         kwargs.pop("method", None)
         kwargs.pop("json", None)
-        return (request_sender or _session.post)(**kwargs)
+        return requests.post(**kwargs)
 
     return backend_service.request_with_failover(
         "POST",
@@ -83,6 +44,10 @@ def _school_request(
         token=token,
         cookie=cookie,
         timeout=REQUEST_TIMEOUT,
+        read_only=read_only,
+        # WebVPN is a read-only fallback. Enrollment and withdrawal always use
+        # the primary school endpoint, even if a prior query used WebVPN.
+        preference=None if read_only else config.BACKEND_PRIMARY,
     )
 
 
@@ -96,6 +61,7 @@ def query_enrolled_courses(
         f"elective/courseResult.do?timestamp={timestamp}&studentCode={config.student_id}",
         token=token,
         cookie=combined_cookie,
+        read_only=True,
     )
 
     if is_session_expired_response(
@@ -157,33 +123,7 @@ def submit_course_selection(
         "elective/volunteer.do",
         data=form_data,
         token=config.token,
-        cookie=backend_service.cookie_header(backend_service.active_profile()),
-    )
-
-
-def delete_course_selection(class_id: str):
-    """Withdraw one selected volunteer using the confirmed school contract."""
-    form_data = {
-        "deleteParam": json.dumps(
-            {
-                "data": {
-                    "operationType": "2",
-                    "studentCode": str(config.student_id),
-                    "electiveBatchCode": str(config.elective_batch_code),
-                    "teachingClassId": str(class_id),
-                    "isMajor": "1",
-                }
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    }
-    return _school_request(
-        "elective/deleteVolunteer.do",
-        data=form_data,
-        token=config.token,
-        cookie=backend_service.cookie_header(backend_service.active_profile()),
-        request_sender=_session.post,
+        cookie=backend_service.cookie_header(backend_service.get_profile(config.BACKEND_PRIMARY)),
     )
 
 
@@ -192,5 +132,4 @@ __all__ = [
     "SchoolSessionExpiredError",
     "query_enrolled_courses",
     "submit_course_selection",
-    "delete_course_selection",
 ]

@@ -11,12 +11,14 @@ import requests
 import choose_course
 import config
 from course_list import (
+    CatalogRequestContext,
     CourseQueryFailure,
     minor_course,
     mooc_course,
     non_programmed_course,
     programmed_course,
     public_course,
+    query_course_page,
     recommended_course,
     sport_course,
 )
@@ -95,7 +97,11 @@ def _looks_like_throttling(message: str) -> bool:
     return any(keyword in normalized for keyword in COURSE_THROTTLE_KEYWORDS)
 
 
-def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
+def query_courses(
+    course_type: str,
+    page: int,
+    context: CatalogRequestContext | None = None,
+) -> tuple[bool, Any, str]:
     """Query one zero-based page and normalize school failures."""
     normalized_type = str(course_type or "").strip().upper()
     if page < 0:
@@ -107,7 +113,7 @@ def query_courses(course_type: str, page: int) -> tuple[bool, Any, str]:
 
     type_name, query_function = COURSE_TYPE_MAP[normalized_type]
     pace_catalog_request()
-    result = query_function(page)
+    result = query_course_page(normalized_type, page, context) if context else query_function(page)
 
     if isinstance(result, CoursesResponse):
         if is_session_expired_response(code=result.code, text=result.msg):

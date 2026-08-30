@@ -76,7 +76,10 @@ def test_login_and_course_pages_expose_required_controls():
     assert "ui_cache_token" not in course_script
     assert "stripUiQuery" in login_script
     assert "stripUiQuery" in course_script
-    assert "SESSION_CREDENTIALS_STORAGE_KEY" in login_script
+    assert "bootstrap.card_key" in login_script
+    assert "SESSION_CREDENTIALS_STORAGE_KEY" not in login_script
+    assert "sessionStorage" not in login_script
+    assert "localStorage" not in login_script
     assert 'id="openTimetable"' not in course
     assert 'id="timetableDialog"' not in course
 
@@ -113,12 +116,22 @@ def test_course_page_exposes_pause_and_relogin_states():
     assert "自动重新登录成功" in script
     assert '"/api/session/recover"' in script
     assert "点击立即尝试自动重新登录" in script
-    assert "loadBrowserRecoveryCredentials" in script
-    assert "window.sessionStorage?.removeItem(SESSION_CREDENTIALS_STORAGE_KEY)" in script
+    assert "loadBrowserRecoveryCredentials" not in script
+    assert "SESSION_CREDENTIALS_STORAGE_KEY" not in script
+    assert "automatic_relogin_available" in script
     assert "重新排队" in script
     assert "task_pause_acknowledged" in script
-    assert "正在完成当前学校请求；安全暂停后即可移除" in script
+    assert "task_queue_revision" in script
+    assert "queueChanged" in script
+    assert "正在完成当前学校请求；安全暂停后即可增删课程或调整优先级" in script
     assert "taskStopping || (!terminalCourse && !canEditPausedTask)" in script
+    assert (
+        "updateLocalCartPreference(item, { priorityRank: currentPreference.priorityRank })"
+        in script
+    )
+    assert (
+        "updateLocalCartPreference(other, { priorityRank: otherPreference.priorityRank })" in script
+    )
 
 
 def test_course_groups_start_collapsed_and_my_courses_is_single_schedule_entry():
@@ -163,6 +176,18 @@ def test_my_courses_restores_schedule_and_list_views():
     )
     assert "虚化块为选课清单中的待选课程" in script
     assert ".schedule-course.is-pending" in styles
+
+
+def test_schedule_cards_expand_for_long_content_and_share_a_time_slot():
+    styles = (STATIC / "styles.css").read_text(encoding="utf-8")
+    stack_rule = styles.split(".schedule-stack {", 1)[1].split("}", 1)[0]
+    course_rule = styles.split(".schedule-course {", 1)[1].split("}", 1)[0]
+
+    assert "grid-auto-flow: column;" in styles
+    assert "grid-auto-columns: minmax(0, 1fr);" in styles
+    assert "overflow: visible;" in stack_rule
+    assert "overflow: visible;" in course_rule
+    assert "flex:" not in stack_rule
 
 
 def test_drawer_dialog_keeps_header_and_footer_outside_scroll_region():

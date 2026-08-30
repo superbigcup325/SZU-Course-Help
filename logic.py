@@ -50,8 +50,8 @@ CAPTCHA_UNAVAILABLE_KEYWORDS = (
 logger = logging.getLogger(__name__)
 
 
-def _school_request(method: str, path: str, **kwargs):
-    """Send one school request through the shared backend/failover policy."""
+def _school_request(method: str, path: str, *, read_only: bool = False, **kwargs):
+    """Send one school request through the shared backend policy."""
     request_function = getattr(requests, method.lower())
 
     def sender(**request_kwargs):
@@ -62,6 +62,7 @@ def _school_request(method: str, path: str, **kwargs):
         method,
         path,
         sender=sender,
+        read_only=read_only,
         **kwargs,
     )
 
@@ -239,6 +240,7 @@ def fetch_elective_batch(
     response = _school_request(
         "POST",
         f"student/{student_id}.do",
+        read_only=True,
         timeout=REQUEST_TIMEOUT,
         token=token,
         cookie=combined_cookie,
@@ -303,7 +305,9 @@ def login(
         "verifyCode": coordinate_string,
     }
 
-    profile = backend_service.active_profile()
+    # Authentication is state-changing and must never inherit a previous
+    # read-only WebVPN fallback. The gateway remains query-only by design.
+    profile = backend_service.get_profile(config.BACKEND_PRIMARY)
     existing_cookie = backend_service.cookie_header(profile)
     request_cookie = "; ".join(value for value in (existing_cookie, parsed_cookie) if value)
     response = _school_request(
@@ -313,8 +317,9 @@ def login(
         timeout=REQUEST_TIMEOUT,
         content_type="application/x-www-form-urlencoded; charset=UTF-8",
         cookie=request_cookie,
+        preference=config.BACKEND_PRIMARY,
     )
-    profile = backend_service.active_profile()
+    profile = backend_service.get_profile(config.BACKEND_PRIMARY)
     set_cookie = (
         response.headers.get_list("set-cookie")
         if hasattr(response.headers, "get_list")
@@ -907,6 +912,8 @@ def get_vtoken() -> str:
     response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={time_stamp}",
+        read_only=True,
+        preference=config.BACKEND_PRIMARY,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     return _parse_captcha_token_response(response)
@@ -930,6 +937,8 @@ def get_new_image() -> tuple[str, str]:
     response = _school_request(
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
+        read_only=True,
+        preference=config.BACKEND_PRIMARY,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -951,6 +960,8 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
     token_response = _school_request(
         "POST",
         f"student/4/vcode.do?timestamp={timestamp}",
+        read_only=True,
+        preference=config.BACKEND_PRIMARY,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
     )
@@ -959,6 +970,8 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
     image_response = _school_request(
         "GET",
         f"student/vcode/image.do?vtoken={vtoken}",
+        read_only=True,
+        preference=config.BACKEND_PRIMARY,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
     )

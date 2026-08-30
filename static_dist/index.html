@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260829.2">
+  <link rel="stylesheet" href="/styles.css?build=20260831.1">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -163,20 +163,7 @@
             <input id="scanInterval" type="number" min="1" step="1" value="60" inputmode="numeric">
           </label>
         </div>
-        <div class="risk-settings">
-          <label class="switch-row">
-            <input id="swapCourseSwitch" type="checkbox">
-            <span>允许自动换选高优先级课程</span>
-          </label>
-          <label class="switch-row risk-confirm-row">
-            <input id="swapRiskConfirm" type="checkbox">
-            <span>我已知悉换选可能导致当前课程被退选</span>
-          </label>
-          <label class="setting-field threshold-field">
-            <span>切课阈值（高优先级剩余名额至少）</span>
-            <input id="swapThreshold" type="number" min="1" step="1" value="5" inputmode="numeric">
-          </label>
-        </div>
+        <p class="settings-note">优先级只控制尝试顺序；助手不会自动退选任何已选课程。</p>
       </section>
       <div id="cartList" class="cart-list"></div>
       <section id="enrollProgress" class="enroll-progress" hidden>
@@ -288,7 +275,7 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/schedule-parser.js?build=20260829.2" defer></script>
-  <script src="/course-app.js?build=20260829.2" defer></script>
+  <script src="/schedule-parser.js?build=20260831.1" defer></script>
+  <script src="/course-app.js?build=20260831.1" defer></script>
 </body>
 </html>

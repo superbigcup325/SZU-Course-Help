@@ -38,6 +38,9 @@ webvpn-browser-profile
 
 *.log
 .server.pid
+.migration.lock
+course_catalog_cache_v2.json
+runtime-data/
 
 # Captcha/OCR working files may contain session-derived data.
 img/

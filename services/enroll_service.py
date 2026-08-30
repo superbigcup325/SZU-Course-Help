@@ -29,7 +29,7 @@ import choose_course
 import config
 import database
 from campus import DEFAULT_CAMPUS_CODE, campus_name
-from course_models import time_signature
+from course_models import priority_group_key, time_signature
 from school_session import is_session_expired_response
 from services import cart_service
 from services.auth_service import (
@@ -49,16 +49,16 @@ _task_state = {
     "stop_requested": False,
     "stop_reason": "",
     "mode": "boost",
+    "queue_revision": 0,
 }
 _settings = {
     "boost_interval_ms": 1000,
     "normal_interval_ms": 10000,
     "scan_interval_ms": 60000,
-    "switch_enabled": False,
-    "switch_confirmed": False,
-    "switch_threshold": 2,
 }
 _business_failure_counts: dict[str, int] = {}
+_unknown_streak_counts: dict[str, int] = {}
+_network_streak_counts: dict[str, int] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -230,6 +230,42 @@ def _remove_course_progress(course_id: str) -> bool:
         return _progress["courses"].pop(course_id, None) is not None
 
 
+def _ensure_course_progress(course: EnrollmentCourse) -> bool:
+    """Add a newly queued course without resetting existing attempt counters."""
+    with _progress_lock:
+        entry = _progress["courses"].get(course.id)
+        if entry is not None:
+            reactivated = entry.get("status") in (
+                database.STATUS_SUCCESS,
+                database.STATUS_FAILED,
+                database.STATUS_NOT_STARTED,
+            )
+            entry.update(
+                {
+                    "name": course.name,
+                    "type": course.type,
+                    "campus_code": course.campus_code,
+                    "campus_name": course.campus_name,
+                    "status": database.STATUS_IN_PROGRESS,
+                }
+            )
+            if reactivated:
+                entry["message"] = "已重新加入本轮队列，等待抢课"
+            return reactivated
+        _progress["courses"][course.id] = {
+            "id": course.id,
+            "name": course.name,
+            "type": course.type,
+            "campus_code": course.campus_code,
+            "campus_name": course.campus_name,
+            "status": database.STATUS_IN_PROGRESS,
+            "attempts": 0,
+            "failures": 0,
+            "message": "已加入本轮队列，等待抢课",
+        }
+        return True
+
+
 def _add_event(level: str, message: str) -> None:
     """记录一条事件并打印到终端。level: info/success/warn/error。"""
     with _progress_lock:
@@ -259,6 +295,7 @@ def get_enroll_progress() -> dict:
             "events": events,
             "mode": str(_task_state["mode"]),
             "settings": dict(_settings),
+            "queue_revision": int(_task_state["queue_revision"]),
         }
     total = len(courses)
     success = sum(1 for c in courses if c["status"] == database.STATUS_SUCCESS)
@@ -278,7 +315,7 @@ def get_enroll_progress() -> dict:
 # ====================================================================
 def reserve_enroll_task() -> bool:
     """Atomically reserve the single enrollment worker slot."""
-    global _business_failure_counts
+    global _business_failure_counts, _network_streak_counts, _unknown_streak_counts
     with _task_condition:
         if _task_state["running"]:
             return False
@@ -296,6 +333,8 @@ def reserve_enroll_task() -> bool:
             }
         )
         _business_failure_counts = {}
+        _unknown_streak_counts = {}
+        _network_streak_counts = {}
         return True
 
 
@@ -336,6 +375,106 @@ def get_enroll_task_state() -> dict[str, str | bool]:
             "stopping_reason": str(_task_state["stop_reason"]),
             "mode": str(_task_state["mode"]),
             "settings": dict(_settings),
+            "queue_revision": int(_task_state["queue_revision"]),
+        }
+
+
+def _queue_mutation_block_locked() -> tuple[str, str] | None:
+    """Return a stable error when a running worker has not reached a safe boundary."""
+    if not _task_state["running"]:
+        return None
+    if _task_state["stop_requested"]:
+        return "抢课任务正在结束，请稍候后再修改清单", "ENROLL_TASK_STOPPING"
+    if not _task_state["paused"]:
+        return "请先暂停抢课任务，再修改清单", "ENROLL_TASK_NOT_PAUSED"
+    if not _task_state["pause_acknowledged"]:
+        return "正在完成当前学校请求，安全暂停后即可修改清单", "ENROLL_TASK_PAUSE_PENDING"
+    return None
+
+
+def _advance_queue_revision_locked() -> int:
+    _task_state["queue_revision"] = int(_task_state["queue_revision"]) + 1
+    _task_condition.notify_all()
+    return int(_task_state["queue_revision"])
+
+
+def add_cart_course(course) -> dict[str, object]:
+    """Add to the DB while holding the same lock used by pause/resume."""
+    with _task_condition:
+        blocked = _queue_mutation_block_locked()
+        if blocked:
+            message, error_code = blocked
+            return {"success": False, "message": message, "error_code": error_code}
+        normalized_id = str(getattr(course, "id", "") or "").strip()
+        if any(
+            str(item.get("id") or "") == normalized_id
+            for item in cart_service.get_courses_by_status("")
+        ):
+            return {
+                "success": False,
+                "message": "该课程已在本地清单中，请使用现有课程项进行调整",
+                "error_code": "COURSE_ALREADY_IN_CART",
+            }
+        result = cart_service.add_course(course)
+        if not result["success"]:
+            return result
+        revision = _advance_queue_revision_locked()
+        return {**result, "queue_revision": revision}
+
+
+def update_cart_course_preferences(course_id: str, **fields) -> dict[str, object]:
+    """Update queue controls only outside a task or at an acknowledged pause."""
+    with _task_condition:
+        blocked = _queue_mutation_block_locked()
+        if blocked:
+            message, error_code = blocked
+            return {"success": False, "message": message, "error_code": error_code}
+        if not cart_service.update_course_preferences(course_id, **fields):
+            return {
+                "success": False,
+                "message": "课程不存在或偏好设置无效",
+                "error_code": "COURSE_UPDATE_FAILED",
+            }
+        revision = _advance_queue_revision_locked()
+        return {
+            "success": True,
+            "message": "课程优先级设置已更新",
+            "queue_revision": revision,
+        }
+
+
+def retry_cart_course(course_id: str) -> dict[str, object]:
+    """Requeue a failed course under the same pause-boundary contract."""
+    with _task_condition:
+        blocked = _queue_mutation_block_locked()
+        if blocked:
+            message, error_code = blocked
+            return {"success": False, "message": message, "error_code": error_code}
+        result = cart_service.retry_failed_course(course_id)
+        if not result["success"]:
+            return result
+        revision = _advance_queue_revision_locked()
+        return {**result, "queue_revision": revision}
+
+
+def update_cart_course_priorities(updates: list[tuple[str, int]]) -> dict[str, object]:
+    """Apply a rank swap atomically at an acknowledged pause boundary."""
+    with _task_condition:
+        blocked = _queue_mutation_block_locked()
+        if blocked:
+            message, error_code = blocked
+            return {"success": False, "message": message, "error_code": error_code}
+        if not cart_service.update_course_priorities(updates):
+            return {
+                "success": False,
+                "message": "课程排序无效或课程不存在",
+                "error_code": "COURSE_PRIORITY_UPDATE_FAILED",
+            }
+        revision = _advance_queue_revision_locked()
+        return {
+            "success": True,
+            "message": "课程优先级顺序已更新",
+            "queue_revision": revision,
         }
 
 
@@ -418,12 +557,6 @@ def update_enroll_settings(**values) -> dict:
         for key in ("boost_interval_ms", "normal_interval_ms", "scan_interval_ms"):
             if key in values:
                 _settings[key] = max(0, min(300000, int(values[key])))
-        if "switch_enabled" in values:
-            _settings["switch_enabled"] = bool(values["switch_enabled"])
-        if "switch_confirmed" in values:
-            _settings["switch_confirmed"] = bool(values["switch_confirmed"])
-        if "switch_threshold" in values:
-            _settings["switch_threshold"] = max(0, min(1000, int(values["switch_threshold"])))
         return get_enroll_settings()
 
 
@@ -432,30 +565,6 @@ def _mode_interval_seconds(mode: str) -> float:
     if int(getattr(config, "delay", 1) or 0) == 0:
         return 0.0
     return max(0, int(_settings[f"{mode}_interval_ms"])) / 1000.0
-
-
-def can_switch_course(
-    *, switch_enabled: bool, risk_confirmed: bool, available_slots: int, threshold: int
-) -> bool:
-    """Return whether explicit user consent and the capacity threshold permit switching."""
-    return bool(switch_enabled and risk_confirmed and available_slots >= max(0, int(threshold)))
-
-
-def withdraw_course(course_id: str, *, available_slots: int, risk_confirmed: bool = False):
-    """Withdraw a selected course only after every automatic-switch safety gate passes."""
-    if not can_switch_course(
-        switch_enabled=_settings["switch_enabled"],
-        risk_confirmed=risk_confirmed,
-        available_slots=available_slots,
-        threshold=_settings["switch_threshold"],
-    ):
-        return False, "自动换课安全条件未满足"
-    response = choose_course.delete_course_selection(str(course_id))
-    text = getattr(response, "text", "") or ""
-    code = _response_code(response)
-    if not (code == "1" or any(word in text for word in ("删除成功", "退选成功", "撤销成功"))):
-        return False, "退选请求未获学校确认"
-    return True, "退选成功"
 
 
 def _wait_until_resumed() -> bool:
@@ -601,31 +710,15 @@ def _active_course_ids() -> set:
 
 
 def _course_group(course) -> str:
-    explicit_group = str(getattr(course, "priority_group", "") or "").strip()
-    if explicit_group:
-        return explicit_group
-    number = str(getattr(course, "course_number", "") or "").strip()
-    schedule = str(
-        getattr(course, "time_signature", "")
-        or time_signature(getattr(course, "teaching_place", ""))
-        or ""
-    ).strip()
-    if number and schedule:
-        return f"{number}|{schedule}"
-    return number or schedule or str(course.id)
-
-
-def _row_course_group(row: dict) -> str:
-    explicit_group = str(row.get("priority_group") or "").strip()
-    if explicit_group:
-        return explicit_group
-    number = str(row.get("course_number") or "").strip()
-    schedule = str(
-        row.get("time_signature") or time_signature(row.get("teaching_place", ""))
-    ).strip()
-    if number and schedule:
-        return f"{number}|{schedule}"
-    return number or schedule or str(row.get("id", ""))
+    return priority_group_key(
+        explicit_group=getattr(course, "priority_group", ""),
+        course_number=getattr(course, "course_number", ""),
+        schedule_signature=(
+            getattr(course, "time_signature", "")
+            or time_signature(getattr(course, "teaching_place", ""))
+        ),
+        course_id=course.id,
+    )
 
 
 def _numeric(value):
@@ -683,44 +776,6 @@ def _scan_course_available(course) -> int:
     except Exception as exc:
         logger.info("Scan query failed for %s: %s", course.name, exc)
     return 0
-
-
-def _has_selected_lower_priority(course) -> bool:
-    group = _course_group(course)
-    rank = getattr(course, "priority_rank", 0)
-    return any(
-        _row_course_group(row) == group
-        and int(row.get("priority_rank", 0) or 0) > rank
-        and row.get("status") == database.STATUS_SUCCESS
-        for row in cart_service.get_courses_by_status("")
-    )
-
-
-def _try_priority_switch(course, available_slots: int) -> bool:
-    """Withdraw a lower-priority sibling only after all safety gates pass."""
-    group = _course_group(course)
-    for row in cart_service.get_courses_by_status(database.STATUS_SUCCESS):
-        sibling_group = _row_course_group(row)
-        if sibling_group != group or int(row.get("priority_rank", 0) or 0) <= getattr(
-            course, "priority_rank", 0
-        ):
-            continue
-        if not _settings["switch_enabled"] or not _settings["switch_confirmed"]:
-            return False
-        try:
-            ok, message = withdraw_course(
-                row["id"], available_slots=available_slots, risk_confirmed=True
-            )
-        except (requests.RequestException, choose_course.SchoolSessionExpiredError) as exc:
-            _add_event("warn", f"未执行优先级换课：退选请求异常（{type(exc).__name__}）")
-            return False
-        if not ok:
-            _add_event("warn", f"未执行优先级换课：{message}")
-            return False
-        cart_service.update_status(row["id"], database.STATUS_FAILED)
-        _add_event("warn", f"已退选低优先级课程 {row.get('name', row['id'])}，准备抢更高优先级课程")
-        return True
-    return False
 
 
 def remove_cart_course(course_id: str) -> dict[str, bool | str]:
@@ -786,6 +841,7 @@ def remove_cart_course(course_id: str) -> dict[str, bool | str]:
                 **result,
                 "error_code": "COURSE_NOT_FOUND",
             }
+        revision = _advance_queue_revision_locked()
 
         if was_running and not _active_course_ids():
             should_stop = True
@@ -812,25 +868,80 @@ def remove_cart_course(course_id: str) -> dict[str, bool | str]:
             "success": True,
             "message": "课程已移除；清单中已无待处理课程，任务正在结束",
             "task_stopping": True,
+            "queue_revision": revision,
         }
     return {
         "success": True,
         "message": "课程已从本地清单移除",
         "task_stopping": False,
+        "queue_revision": revision,
     }
+
+
+def _course_from_row(item: dict) -> EnrollmentCourse:
+    return EnrollmentCourse(
+        id=str(item["id"]),
+        type=str(item["type"]),
+        name=str(item["name"]),
+        campus_code=str(item.get("campus_code") or DEFAULT_CAMPUS_CODE),
+        campus_name=str(
+            item.get("campus_name") or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
+        ),
+        course_number=str(item.get("course_number") or ""),
+        teaching_place=str(item.get("teaching_place") or ""),
+        time_signature=str(
+            item.get("time_signature") or time_signature(item.get("teaching_place", ""))
+        ),
+        priority_group=str(item.get("priority_group") or ""),
+        priority_rank=int(item.get("priority_rank", 0) or 0),
+    )
+
+
+def _reconcile_courses(courses: list[EnrollmentCourse]) -> list[EnrollmentCourse]:
+    """Rebuild the active queue from SQLite without resetting unchanged progress."""
+    rows = cart_service.get_courses_by_status("")
+    rows_by_id = {str(row.get("id")): row for row in rows}
+    active_rows = [
+        row
+        for row in rows
+        if row.get("status") in (database.STATUS_NOT_STARTED, database.STATUS_IN_PROGRESS)
+        and row.get("auto_enabled", 1)
+    ]
+    active_ids = {str(row["id"]) for row in active_rows}
+
+    for old_course in list(courses):
+        row = rows_by_id.get(old_course.id)
+        if row is not None and not row.get("auto_enabled", 1):
+            if row.get("status") == database.STATUS_IN_PROGRESS:
+                cart_service.update_status(old_course.id, database.STATUS_NOT_STARTED)
+            _remove_course_progress(old_course.id)
+
+    reconciled = [_course_from_row(row) for row in active_rows]
+    reconciled.sort(key=lambda course: (_course_group(course), course.priority_rank, course.id))
+    for course in reconciled:
+        if rows_by_id[course.id].get("status") == database.STATUS_NOT_STARTED:
+            cart_service.update_status(course.id, database.STATUS_IN_PROGRESS)
+        if _ensure_course_progress(course):
+            _add_event("info", f"{course.name} 已加入当前抢课队列")
+
+    courses[:] = reconciled
+    for mapping in (_business_failure_counts, _unknown_streak_counts, _network_streak_counts):
+        for course_id in list(mapping):
+            if course_id not in active_ids:
+                mapping.pop(course_id, None)
+    return courses
 
 
 def grab_courses(courses: list) -> GrabOutcome:
     """Run bounded enrollment rounds using the current mode and priorities."""
-    active_ids = _active_course_ids()
-    active = [course for course in courses if course.id in active_ids]
-    active.sort(
-        key=lambda course: (_course_group(course), getattr(course, "priority_rank", 0), course.id)
-    )
+    active = _reconcile_courses(courses)
     unknown_streak_limit = max(1, int(config.unknown_response_pause_threshold))
-    unknown_streak = {course.id: 0 for course in active}
-    network_streak = {course.id: 0 for course in active}
+    unknown_streak = _unknown_streak_counts
+    network_streak = _network_streak_counts
     business_failures = {course.id: _business_failure_counts.get(course.id, 0) for course in active}
+    for course in active:
+        unknown_streak.setdefault(course.id, 0)
+        network_streak.setdefault(course.id, 0)
 
     if not active:
         return GrabOutcome.COMPLETED
@@ -838,8 +949,15 @@ def grab_courses(courses: list) -> GrabOutcome:
     for _ in range(max(1, int(config.count))):
         if is_stop_requested():
             return GrabOutcome.COMPLETED
+        active = _reconcile_courses(courses)
         if not active:
             break
+        business_failures = {
+            course.id: _business_failure_counts.get(course.id, 0) for course in active
+        }
+        for course in active:
+            unknown_streak.setdefault(course.id, 0)
+            network_streak.setdefault(course.id, 0)
         for course in list(active):
             if is_stop_requested():
                 return GrabOutcome.COMPLETED
@@ -851,16 +969,6 @@ def grab_courses(courses: list) -> GrabOutcome:
                 _update_course_progress(course.id, message="扫描课程目录，等待课程放课")
                 available_slots = _scan_course_available(course)
                 if available_slots <= 0:
-                    if not _wait_between_requests(_mode_interval_seconds("scan")):
-                        return GrabOutcome.PAUSED
-                    continue
-                if _has_selected_lower_priority(course) and not _try_priority_switch(
-                    course, available_slots
-                ):
-                    _update_course_progress(
-                        course.id,
-                        message="检测到高优先级课程有容量，但换课安全条件未满足，暂不退选",
-                    )
                     if not _wait_between_requests(_mode_interval_seconds("scan")):
                         return GrabOutcome.PAUSED
                     continue
@@ -880,6 +988,8 @@ def grab_courses(courses: list) -> GrabOutcome:
                     response = choose_course.submit_course_selection(course.id, course.type)
                 network_streak[course.id] = 0
                 action = _classify_response(response)
+                if action != "unknown":
+                    unknown_streak[course.id] = 0
 
                 if action == "success":
                     cart_service.update_status(course.id, database.STATUS_SUCCESS)
@@ -890,16 +1000,6 @@ def grab_courses(courses: list) -> GrabOutcome:
                     )
                     _add_event("success", f"{course.name} 已加入我的课程")
                     active.remove(course)
-                    group = _course_group(course)
-                    for sibling in list(active):
-                        if _course_group(sibling) == group:
-                            cart_service.update_status(sibling.id, database.STATUS_FAILED)
-                            _update_course_progress(
-                                sibling.id,
-                                status=database.STATUS_FAILED,
-                                message="同优选组已有课程抢到，停止尝试",
-                            )
-                            active.remove(sibling)
                 elif action == "retry":
                     reason = _response_message(response)
                     business_failures[course.id] += 1
@@ -1086,26 +1186,7 @@ def _run_enroll_task():
         if item.get("auto_enabled", 1)
     ]
 
-    courses = [
-        EnrollmentCourse(
-            id=item["id"],
-            type=item["type"],
-            name=item["name"],
-            campus_code=str(item.get("campus_code") or DEFAULT_CAMPUS_CODE),
-            campus_name=str(
-                item.get("campus_name")
-                or campus_name(item.get("campus_code") or DEFAULT_CAMPUS_CODE)
-            ),
-            course_number=str(item.get("course_number") or ""),
-            teaching_place=str(item.get("teaching_place") or ""),
-            time_signature=str(
-                item.get("time_signature") or time_signature(item.get("teaching_place", ""))
-            ),
-            priority_group=str(item.get("priority_group") or ""),
-            priority_rank=int(item.get("priority_rank", 0) or 0),
-        )
-        for item in courses_data
-    ]
+    courses = [_course_from_row(item) for item in courses_data]
     courses.sort(key=lambda item: (_course_group(item), item.priority_rank, item.id))
 
     if not courses:
