@@ -20,7 +20,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from services import auth_service, backend_service
@@ -70,11 +70,11 @@ def _known_browser_paths(
             if (value := str(env.get(key, "")).strip())
         )
         suffixes = (
-            Path("Google/Chrome/Application/chrome.exe"),
-            Path("Microsoft/Edge/Application/msedge.exe"),
-            Path("Chromium/Application/chrome.exe"),
+            PureWindowsPath("Google/Chrome/Application/chrome.exe"),
+            PureWindowsPath("Microsoft/Edge/Application/msedge.exe"),
+            PureWindowsPath("Chromium/Application/chrome.exe"),
         )
-        return tuple(str(Path(root) / suffix) for root in roots for suffix in suffixes)
+        return tuple(str(PureWindowsPath(root) / suffix) for root in roots for suffix in suffixes)
     return ()
 
 
