@@ -6,7 +6,7 @@
 
 1. 修复 v3.6.1 自动重新登录获取验证码时继承过期学校 Cookie 的回归。验证码 token 与图片请求现在完全省略 `Cookie` 请求头，让学校重新下发有效的 `route` 与 `insert_cookie`。
 2. 无 Cookie 规则同时覆盖手动登录验证码、旧 OCR 路径和当前自动重登录路径；登录提交、课程查询、抢课请求和 WebVPN 的 Cookie 行为保持不变。
-3. 修复 Linux 打包版启动及“学校原始页面”无法拉起浏览器的问题。Linux 外部子进程会过滤 Nuitka 注入的空库路径和发布目录条目，避免捆绑 OpenSSL 遮蔽系统库。
+3. 修复 Linux 打包版启动及“学校原始页面”无法拉起浏览器的问题。程序会正确识别 Nuitka 编译态，并从 Linux 外部子进程环境中过滤 OpenCV 导入产生的空库路径和发布目录条目，避免捆绑 OpenSSL 遮蔽系统库。
 4. Linux 浏览器入口使用无 shell 的 `xdg-open`，失败时回退 `gio open`；WebVPN 受控浏览器使用相同隔离环境，Windows 与 macOS 行为不变。
 5. “学校原始页面”改为浏览器真实链接，即使系统 opener 不可用也能直接访问；后端程序化入口仍保留固定公开 URL。
 6. Linux Release 构建新增真实产物冒烟测试，验证外部子进程环境不含空路径或发布目录，并确认 ddddocr、OpenCV 与 ONNX Runtime 仍能初始化。

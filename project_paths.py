@@ -14,16 +14,22 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def is_frozen() -> bool:
+    """Return whether this module runs inside a packaged executable.
+
+    PyInstaller exposes ``sys.frozen`` while Nuitka intentionally does not;
+    compiled Nuitka modules instead expose the module-level ``__compiled__``
+    marker. Release builds must recognize both so writable paths and Linux
+    child-process isolation do not silently fall back to source-mode rules.
+    """
+    return bool(getattr(sys, "frozen", False) or globals().get("__compiled__"))
+
+
 def application_dir() -> Path:
     """Return the directory that owns runtime data for this installation."""
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         return Path(sys.executable).resolve().parent
     return PROJECT_ROOT
-
-
-def is_frozen() -> bool:
-    """Return whether the process is running from a packaged executable."""
-    return bool(getattr(sys, "frozen", False))
 
 
 def user_data_dir() -> Path:
@@ -75,13 +81,14 @@ def key_dir() -> Path:
 def external_process_env() -> dict[str, str]:
     """Return a child-process environment copy that cannot shadow system libraries.
 
-    Nuitka standalone exports ``LD_LIBRARY_PATH`` (observed value ``":"`` on
-    CI builds). glibc resolves empty entries against the current working
-    directory, which the Linux launcher sets to the release folder holding
-    bundled ``libssl.so.3``/``libcrypto.so.3``; any child that loads system
-    OpenSSL/Qt/KIO libraries then aborts with missing ``OPENSSL_3.x``
-    version symbols. Only Linux packaged runs are affected — other platforms
-    and source checkouts get an untouched copy.
+    Importing ``opencv-python`` can prepend its binary paths and an unconditional
+    separator to ``LD_LIBRARY_PATH``. When those paths are empty or absent, the
+    result contains an empty entry. glibc resolves empty entries against the
+    current working directory, which the Linux launcher sets to the release
+    folder holding bundled ``libssl.so.3``/``libcrypto.so.3``; children that
+    load system OpenSSL/Qt/KIO libraries can then abort with missing
+    ``OPENSSL_3.x`` version symbols. Only Linux packaged runs are affected —
+    other platforms and source checkouts get an untouched copy.
 
     Entries are filtered with ``os.pathsep``: empty items, ``.``, and paths
     resolving into the application directory are dropped; everything else

@@ -22,6 +22,43 @@ def frozen_linux(monkeypatch):
     return monkeypatch
 
 
+def test_is_frozen_recognizes_pyinstaller_marker(monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.delitem(project_paths.__dict__, "__compiled__", raising=False)
+
+    assert project_paths.is_frozen() is True
+
+
+def test_is_frozen_recognizes_nuitka_compiled_marker(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setitem(project_paths.__dict__, "__compiled__", object())
+
+    assert project_paths.is_frozen() is True
+
+
+def test_is_frozen_is_false_in_source_mode(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.delitem(project_paths.__dict__, "__compiled__", raising=False)
+
+    assert project_paths.is_frozen() is False
+
+
+def test_nuitka_marker_activates_cv2_library_path_cleanup(monkeypatch, tmp_path):
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setitem(project_paths.__dict__, "__compiled__", object())
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(sys, "executable", str(release_dir / "SZU-Course-Help"))
+    monkeypatch.setattr(project_paths.os, "pathsep", ":")
+    monkeypatch.setenv("LD_LIBRARY_PATH", ":/opt/hosted-python/lib")
+
+    env = external_process_env()
+
+    assert project_paths.application_dir() == release_dir.resolve()
+    assert env["LD_LIBRARY_PATH"] == "/opt/hosted-python/lib"
+
+
 def test_non_frozen_environment_returned_unchanged(monkeypatch):
     monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/vendor::/usr/local/lib")
     monkeypatch.setattr(project_paths, "is_frozen", lambda: False)
