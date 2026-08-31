@@ -206,3 +206,151 @@ def test_omit_cookie_removes_header_instead_of_sending_empty_value(
     )
 
     assert "Cookie" not in captured["headers"]
+
+
+def test_omit_cookie_keeps_webvpn_gateway_cookie(monkeypatch):
+    _authenticate_webvpn(monkeypatch)
+    captured = {}
+
+    def sender(**kwargs):
+        captured.update(kwargs["headers"])
+        return SimpleNamespace(status_code=200)
+
+    backend_service.request_with_failover(
+        "GET",
+        "student/vcode/image.do?vtoken=test",
+        sender=sender,
+        omit_cookie=True,
+        read_only=True,
+        preference=config.BACKEND_WEBVPN,
+    )
+
+    assert captured["Cookie"] == "_webvpn_key=key; webvpn_username=user; webvpn_username_NS_Sig=sig"
+
+
+def test_inherit_explicit_and_empty_policies_keep_existing_cookie_behaviour():
+    captured = {}
+
+    def sender(**kwargs):
+        captured.update(kwargs["headers"])
+        return SimpleNamespace(status_code=200)
+
+    backend_service.request_with_failover(
+        "GET", "elective/status.do", sender=sender, read_only=True
+    )
+    assert captured["Cookie"] == "route=school"
+
+    backend_service.request_with_failover(
+        "GET",
+        "elective/status.do",
+        sender=sender,
+        read_only=True,
+        cookie="route=explicit",
+    )
+    assert captured["Cookie"] == "route=explicit"
+
+    backend_service.request_with_failover(
+        "GET", "elective/status.do", sender=sender, read_only=True, cookie=""
+    )
+    assert captured["Cookie"] == ""
+
+
+def test_get_new_image_requests_cookie_omission(monkeypatch):
+    captured = {}
+
+    class ImageResponse:
+        status_code = 200
+        content = b"\xff\xd8\xff\x00" + b"0" * 16
+        headers = {
+            "Set-Cookie": "route=fresh; insert_cookie=fresh; Path=/",
+            "Content-Type": "image/jpeg",
+        }
+
+        def raise_for_status(self):
+            return None
+
+    def request_with_failover(*_args, **kwargs):
+        captured.update(kwargs)
+        return ImageResponse()
+
+    monkeypatch.setattr(config, "combined_cookie", "route=expired; JSESSIONID=stale")
+    monkeypatch.setattr(logic, "get_vtoken", lambda: "vtoken")
+    monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
+
+    _vtoken, cookie = logic.get_new_image()
+
+    assert "route=fresh" in cookie
+    assert captured["omit_cookie"] is True
+
+
+def test_school_login_submits_only_this_rounds_captcha_cookie(monkeypatch):
+    monkeypatch.setattr(config, "combined_cookie", "route=expired; JSESSIONID=stale")
+    captured = {}
+
+    class Response:
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"code": "0", "msg": "rejected"}
+
+    def request_with_failover(*_args, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(backend_service, "request_with_failover", request_with_failover)
+
+    result = logic.login(
+        "2024110122",
+        "vtoken",
+        "encrypted",
+        "1-2,3-4,5-6,7-8",
+        "route=fresh; insert_cookie=fresh",
+    )
+
+    assert result["success"] is False
+    assert captured["cookie"] == "route=fresh; insert_cookie=fresh"
+    assert captured["omit_cookie"] is False
+
+
+def test_school_login_request_header_carries_only_captcha_cookie(monkeypatch):
+    monkeypatch.setattr(config, "combined_cookie", "route=expired; JSESSIONID=stale")
+    captured = {}
+
+    class Response:
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"code": "0", "msg": "rejected"}
+
+    def post(**kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(requests, "post", post)
+
+    logic.login("2024110122", "vtoken", "encrypted", "1-2,3-4,5-6,7-8", "route=fresh")
+
+    assert captured["headers"]["Cookie"] == "route=fresh"
+
+
+def test_school_login_without_captcha_cookie_omits_the_header(monkeypatch):
+    captured = {}
+
+    class Response:
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"code": "0", "msg": "rejected"}
+
+    def post(**kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr(requests, "post", post)
+
+    logic.login("2024110122", "vtoken", "encrypted", "1-2,3-4,5-6,7-8", "")
+
+    assert "Cookie" not in captured["headers"]
