@@ -31,6 +31,11 @@ MAX_CAPTCHA_BYTES = 2 * 1024 * 1024
 CAPTCHA_WIDTH = 250
 CAPTCHA_HEIGHT = 80
 OCR_RETRY_DELAY_SECONDS = 0.25
+# A structurally wrong captcha response (valid image but missing the required
+# Set-Cookie, malformed token payload) cannot succeed by repeating the
+# identical request, so the OCR loops cap consecutive contract failures
+# instead of burning the whole recognition budget (issue #9).
+STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE = 2
 CAPTCHA_UNAVAILABLE_KEYWORDS = (
     "非选课时间",
     "不在选课时间",
@@ -124,6 +129,7 @@ def verify_vcode(
     vtoken = ""
     cookie = ""
     last_error: Exception | None = None
+    structural_failures = 0
     for attempt in range(1, max_attempts + 1):
         try:
             vtoken, cookie = get_new_image()
@@ -138,14 +144,29 @@ def verify_vcode(
             raise
         except (ImportError, ModuleNotFoundError):
             raise
-        except Exception as exc:
+        except CaptchaResponseError as exc:
+            structural_failures += 1
             last_error = exc
-        logger.warning(
-            "OCR captcha attempt %s/%s failed: %s",
-            attempt,
-            max_attempts,
-            last_error,
-        )
+            if structural_failures > STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE:
+                logger.error("Captcha contract kept failing; stopping OCR retries: %s", exc)
+                raise RuntimeError(
+                    f"验证码接口连续 {structural_failures} 次返回结构性异常，已提前终止: {exc}"
+                ) from exc
+            logger.warning(
+                "OCR captcha contract failure %s/%s: %s",
+                structural_failures,
+                STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE,
+                exc,
+            )
+        except Exception as exc:
+            structural_failures = 0
+            last_error = exc
+            logger.warning(
+                "OCR captcha attempt %s/%s failed: %s",
+                attempt,
+                max_attempts,
+                exc,
+            )
         if attempt < max_attempts:
             time.sleep(min(OCR_RETRY_DELAY_SECONDS * attempt, 1.0))
     else:
@@ -173,6 +194,7 @@ def verify_vcode_login_flow(
         raise RuntimeError("缺少自动重登录所需的学号或密码")
 
     last_error: Exception | None = None
+    structural_failures = 0
     for attempt in range(1, max_attempts + 1):
         try:
             captcha = fetch_vtoken_and_image(1)
@@ -195,14 +217,29 @@ def verify_vcode_login_flow(
             raise
         except (ImportError, ModuleNotFoundError):
             raise
-        except Exception as exc:
+        except CaptchaResponseError as exc:
+            structural_failures += 1
             last_error = exc
-        logger.warning(
-            "Login-page OCR attempt %s/%s failed: %s",
-            attempt,
-            max_attempts,
-            last_error,
-        )
+            if structural_failures > STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE:
+                logger.error("Captcha contract kept failing; stopping OCR retries: %s", exc)
+                raise RuntimeError(
+                    f"验证码接口连续 {structural_failures} 次返回结构性异常，已提前终止: {exc}"
+                ) from exc
+            logger.warning(
+                "Login-page captcha contract failure %s/%s: %s",
+                structural_failures,
+                STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE,
+                exc,
+            )
+        except Exception as exc:
+            structural_failures = 0
+            last_error = exc
+            logger.warning(
+                "Login-page OCR attempt %s/%s failed: %s",
+                attempt,
+                max_attempts,
+                exc,
+            )
         if attempt < max_attempts:
             time.sleep(min(OCR_RETRY_DELAY_SECONDS * attempt, 1.0))
 
@@ -307,16 +344,20 @@ def login(
 
     # Authentication is state-changing and must never inherit a previous
     # read-only WebVPN fallback. The gateway remains query-only by design.
-    profile = backend_service.get_profile(config.BACKEND_PRIMARY)
-    existing_cookie = backend_service.cookie_header(profile)
-    request_cookie = "; ".join(value for value in (existing_cookie, parsed_cookie) if value)
+    #
+    # The login POST submits only the cookie issued by this captcha round —
+    # the browser contract (captcha Set-Cookie -> login request). Concatenating
+    # the stale runtime session resubmits expired route/JSESSIONID values with
+    # duplicate cookie names, whose ordering the school resolves
+    # unpredictably (issue #9).
     response = _school_request(
         "POST",
         "student/check/login.do",
         data=form_data,
         timeout=REQUEST_TIMEOUT,
         content_type="application/x-www-form-urlencoded; charset=UTF-8",
-        cookie=request_cookie,
+        cookie=parsed_cookie or None,
+        omit_cookie=not parsed_cookie,
         preference=config.BACKEND_PRIMARY,
     )
     profile = backend_service.get_profile(config.BACKEND_PRIMARY)

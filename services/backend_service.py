@@ -154,6 +154,13 @@ def _cookie_for_profile(profile: BackendProfile, supplied: str | None) -> str:
     return "; ".join(value for value in values if value)
 
 
+def _gateway_cookie_for_omit(profile: BackendProfile) -> str:
+    """Cookie kept when a caller omits the school session cookie."""
+    if profile.key == config.BACKEND_WEBVPN:
+        return str(getattr(config, "webvpn_cookie", "") or "").strip()
+    return ""
+
+
 def rewrite_referer_for_profile(referer: str | None, profile: BackendProfile) -> str | None:
     if not referer:
         return None
@@ -246,6 +253,10 @@ def request_with_failover(
         if profile.key == config.BACKEND_WEBVPN and not has_webvpn_cookies():
             raise WebVPNAuthenticationRequiredError("WebVPN authentication is required")
         try:
+            # A school-cookie omission must not drop the WebVPN gateway cookie:
+            # it authenticates the gateway itself, not the school session
+            # (issue #9). On the primary profile the header is dropped whole.
+            gateway_cookie = _gateway_cookie_for_omit(profile) if omit_cookie else ""
             response = sender(
                 url=f"{profile.base_url}{normalized_path}",
                 method=method.upper(),
@@ -256,8 +267,9 @@ def request_with_failover(
                     token=token,
                     content_type=content_type,
                     accept=accept,
-                    cookie=None if omit_cookie else _cookie_for_profile(profile, cookie),
-                    omit_cookie=omit_cookie,
+                    cookie=gateway_cookie
+                    or (None if omit_cookie else _cookie_for_profile(profile, cookie)),
+                    omit_cookie=omit_cookie and not gateway_cookie,
                     referer=rewrite_referer_for_profile(referer, profile),
                     extra=extra_headers,
                 ),
