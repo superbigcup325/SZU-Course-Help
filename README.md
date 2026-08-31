@@ -34,6 +34,14 @@
 
 启动时先在终端输入学号，程序会生成并显示与本机身份绑定的 Card Key；输入 `Y` 后自动启动本地服务并打开登录页。首次学校登录仍由用户输入密码并手动完成点击验证码。详细步骤见 [Markdown 使用手册](docs/USER_GUIDE.md) 和 [PDF 使用手册](output/pdf/SZU-Course-Help-User-Guide.pdf)。
 
+### v3.6.2 Release 更新
+
+- 修复自动重新登录获取验证码时继承过期 Cookie 的回归；验证码 token 和图片请求现在完全省略 `Cookie` 请求头，学校可重新下发有效路由 Cookie。
+- 修复 Linux 打包版启动及“学校原始页面”无法拉起浏览器的问题；外部子进程不再继承会让捆绑 OpenSSL 遮蔽系统库的发布目录搜索路径。
+- Linux 使用无 shell 的 `xdg-open`/`gio open` 安全回退，WebVPN 受控浏览器同样使用隔离环境；Windows 与 macOS 行为保持不变。
+- “学校原始页面”改为浏览器真实链接，并为 Linux Release 增加真实构建产物的子进程环境冒烟测试。
+- 单门课程连续无法识别学校返回的保护性暂停阈值由 200 次提高到 2000 次；任意一次可识别响应仍会立即清零该课程计数。
+
 ### v3.6.1 Release 更新
 
 - 爆发模式转一般模式、一般模式转扫描模式的业务失败阈值均可独立填写，范围为 1 至 1,000,000 次。
@@ -298,7 +306,7 @@ python main.py
 | `COURSE_SELECT_LEGACY_DATA_DIR` | 自动发现 | 多个旧 Release 并存时明确指定迁移来源 |
 | `COURSE_SELECT_KEY_PASSPHRASE` | 空 | 加密 Ed25519 私钥 |
 | `COURSE_SELECT_PORT` | `8000` | 本地 WebUI 首选端口 |
-| `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT` | `200` | 单门课连续未知响应的保护性暂停阈值 |
+| `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT` | `2000` | 单门课连续未知响应的保护性暂停阈值 |
 | `COURSE_SELECT_CATALOG_PAGE_DELAY_MS` | `600` | 完整目录相邻学校请求的最小间隔（毫秒） |
 | `COURSE_SELECT_CATALOG_THROTTLE_RETRIES` | `3` | 学校明确限流时的有限重试上限 |
 | `COURSE_SELECT_CATALOG_THROTTLE_BACKOFF_MS` | `2000` | 首次限流退避时间（毫秒） |
@@ -418,7 +426,7 @@ python -m pip install -e ".[build]"
 
 ### 正式开放后抢不到，会不会尝试 20 次就停止？
 
-不会。课程满员是明确的可重试状态，会持续轮询，直到抢到、出现不可恢复错误、你手动暂停，或遇到连续网络异常或连续 200 次未知响应而触发保护性暂停。未知计数按课程分别维护，只统计连续未知响应；中间只要收到一次可识别结果就会清零。需要自定义时可在启动前设置 `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT`，但不建议取消保护。
+不会。课程满员是明确的可重试状态，会持续轮询，直到抢到、出现不可恢复错误、你手动暂停，或遇到连续网络异常或连续 2000 次未知响应而触发保护性暂停。未知计数按课程分别维护，只统计连续未知响应；中间只要收到一次可识别结果就会清零。需要自定义时可在启动前设置 `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT`，但不建议取消保护。
 
 ### 为什么刷新失败后课程没有消失？
 

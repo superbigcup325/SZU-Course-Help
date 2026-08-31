@@ -97,7 +97,7 @@ from services.webvpn_auth_service import ControlledBrowserUnavailableError
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260831.2"
+UI_ASSET_BUILD = "20260831.3"
 logger = logging.getLogger(__name__)
 OFFICIAL_SCHOOL_HOME_URL = f"{config.SCHOOL_BASE_URL}*default/index.do"
 
@@ -148,7 +148,7 @@ LOCAL_ORIGINS = (
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.6.1")
+app = FastAPI(title="深大抢课助手 API", version="3.6.2")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
