@@ -181,3 +181,28 @@ def test_captcha_token_request_is_pinned_to_primary(monkeypatch):
     assert logic.get_vtoken() == "vtoken"
     assert captured["read_only"] is True
     assert captured["preference"] == config.BACKEND_PRIMARY
+    assert captured["omit_cookie"] is True
+
+
+@pytest.mark.parametrize("existing_cookie", ["route=expired; JSESSIONID=stale", ""])
+def test_omit_cookie_removes_header_instead_of_sending_empty_value(
+    monkeypatch,
+    existing_cookie,
+):
+    monkeypatch.setattr(config, "combined_cookie", existing_cookie)
+    captured = {}
+
+    def sender(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(status_code=200)
+
+    backend_service.request_with_failover(
+        "GET",
+        "student/vcode/image.do?vtoken=test",
+        sender=sender,
+        preference=config.BACKEND_PRIMARY,
+        read_only=True,
+        omit_cookie=True,
+    )
+
+    assert "Cookie" not in captured["headers"]

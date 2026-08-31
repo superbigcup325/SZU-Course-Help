@@ -186,6 +186,53 @@ def test_captcha_token_response_rejects_malformed_success_payload():
         logic._parse_captcha_token_response(response)
 
 
+@pytest.mark.parametrize("existing_cookie", ["route=expired; JSESSIONID=stale", ""])
+@pytest.mark.parametrize("fetcher", ["legacy", "current"])
+def test_captcha_fetch_completely_omits_cookie_header(
+    monkeypatch,
+    tmp_path,
+    existing_cookie,
+    fetcher,
+):
+    monkeypatch.setattr(config, "combined_cookie", existing_cookie)
+    monkeypatch.setattr(logic, "_captcha_image_path", lambda: tmp_path / "captcha.jpg")
+    captured_headers = []
+
+    token_response = DummyCaptchaResponse(
+        {"data": {"token": "vtoken"}},
+        text='{"data":{"token":"vtoken"}}',
+    )
+    image_response = DummyCaptchaResponse({})
+    image_response.content = b"\xff\xd8\xff\xe0" + b"\x00" * 20
+    image_response.headers = {
+        "Content-Type": "image/jpeg",
+        "Set-Cookie": "route=fresh; Path=/, insert_cookie=node; Path=/",
+    }
+
+    def fake_post(**kwargs):
+        captured_headers.append(dict(kwargs["headers"]))
+        return token_response
+
+    def fake_get(**kwargs):
+        captured_headers.append(dict(kwargs["headers"]))
+        return image_response
+
+    monkeypatch.setattr(logic.requests, "post", fake_post)
+    monkeypatch.setattr(logic.requests, "get", fake_get)
+
+    if fetcher == "legacy":
+        vtoken, cookie = logic.get_new_image()
+        assert vtoken == "vtoken"
+        assert logic.parse_cookie(cookie) == "route=fresh; insert_cookie=node"
+    else:
+        result = logic._fetch_vtoken_and_image_once()
+        assert result["vtoken"] == "vtoken"
+        assert result["imageUrl"].startswith("data:image/jpeg;base64,")
+
+    assert len(captured_headers) == 2
+    assert all("Cookie" not in headers for headers in captured_headers)
+
+
 def test_captcha_unavailable_is_not_retried(monkeypatch):
     calls = []
 

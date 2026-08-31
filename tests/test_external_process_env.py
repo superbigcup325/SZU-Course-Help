@@ -15,6 +15,7 @@ def frozen_linux(monkeypatch):
     """Simulate a Nuitka standalone Linux run rooted at tmp_path."""
     monkeypatch.setattr(project_paths, "is_frozen", lambda: True)
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(project_paths.os, "pathsep", ":")
     monkeypatch.setattr(
         project_paths, "application_dir", lambda: project_paths.Path("/release/dir")
     )
@@ -106,6 +107,7 @@ def test_open_external_url_uses_argv_and_sanitized_env(monkeypatch):
     monkeypatch.setattr(app.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     monkeypatch.setattr(app, "external_process_env", lambda: {"PATH": "/usr/bin", "HOME": "/root"})
+    monkeypatch.setattr(app.sys, "platform", "linux")
 
     assert app.open_external_url("http://example.com/page") is True
     assert seen["argv"] == ["/usr/bin/xdg-open", "http://example.com/page"]
@@ -126,6 +128,7 @@ def test_open_external_url_falls_back_to_gio(monkeypatch):
     monkeypatch.setattr(app.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(app.subprocess, "run", fake_run)
     monkeypatch.setattr(app, "external_process_env", dict)
+    monkeypatch.setattr(app.sys, "platform", "linux")
 
     assert app.open_external_url("http://example.com/page") is True
     assert [argv[0] for argv in calls] == ["/usr/bin/xdg-open", "/usr/bin/gio"]

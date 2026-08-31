@@ -914,6 +914,7 @@ def get_vtoken() -> str:
         f"student/4/vcode.do?timestamp={time_stamp}",
         read_only=True,
         preference=config.BACKEND_PRIMARY,
+        omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     return _parse_captcha_token_response(response)
@@ -939,6 +940,7 @@ def get_new_image() -> tuple[str, str]:
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
         preference=config.BACKEND_PRIMARY,
+        omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
@@ -962,6 +964,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
         f"student/4/vcode.do?timestamp={timestamp}",
         read_only=True,
         preference=config.BACKEND_PRIMARY,
+        omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
     )
@@ -972,6 +975,7 @@ def _fetch_vtoken_and_image_once() -> dict[str, str]:
         f"student/vcode/image.do?vtoken={vtoken}",
         read_only=True,
         preference=config.BACKEND_PRIMARY,
+        omit_cookie=True,
         timeout=CAPTCHA_REQUEST_TIMEOUT,
         accept="application/json, text/javascript, */*; q=0.01",
     )

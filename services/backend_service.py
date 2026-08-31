@@ -171,6 +171,7 @@ def build_headers(
     content_type: str | None = None,
     accept: str = "*/*",
     cookie: str | None = None,
+    omit_cookie: bool = False,
     referer: str | None = None,
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -178,13 +179,14 @@ def build_headers(
         "Accept": accept,
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6,zh-TW;q=0.5",
-        "Cookie": cookie if cookie is not None else cookie_header(profile),
         "Host": profile.host,
         "Origin": profile.origin,
         "Referer": referer or profile.referer,
         "User-Agent": _UA,
         "X-Requested-With": "XMLHttpRequest",
     }
+    if not omit_cookie:
+        headers["Cookie"] = cookie if cookie is not None else cookie_header(profile)
     if content_type:
         headers["Content-Type"] = content_type
     if token:
@@ -225,6 +227,7 @@ def request_with_failover(
     content_type: str | None = None,
     accept: str = "*/*",
     cookie: str | None = None,
+    omit_cookie: bool = False,
     referer: str | None = None,
     extra_headers: dict[str, str] | None = None,
     preference: str | None = None,
@@ -253,7 +256,8 @@ def request_with_failover(
                     token=token,
                     content_type=content_type,
                     accept=accept,
-                    cookie=_cookie_for_profile(profile, cookie),
+                    cookie=None if omit_cookie else _cookie_for_profile(profile, cookie),
+                    omit_cookie=omit_cookie,
                     referer=rewrite_referer_for_profile(referer, profile),
                     extra=extra_headers,
                 ),
