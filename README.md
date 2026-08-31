@@ -34,6 +34,14 @@
 
 启动时先在终端输入学号，程序会生成并显示与本机身份绑定的 Card Key；输入 `Y` 后自动启动本地服务并打开登录页。首次学校登录仍由用户输入密码并手动完成点击验证码。详细步骤见 [Markdown 使用手册](docs/USER_GUIDE.md) 和 [PDF 使用手册](output/pdf/SZU-Course-Help-User-Guide.pdf)。
 
+### v3.6.3 Release 更新
+
+- 完成 Issue #9 的自动重登录收尾：学校登录提交只携带本轮验证码下发的 `route` 与 `insert_cookie`，不再拼接内存中已经过期的学校会话 Cookie。
+- 验证码 token、图片和登录提交形成同一轮干净 Cookie 契约，避免重复 Cookie 名让学校端读取到旧 `route` 或 `JSESSIONID`。
+- 验证码接口连续第 3 次返回结构性异常时会明确终止本轮自动恢复；取得一次完整响应即清零该计数，普通 OCR 识别失败仍保留最多 50 张验证码的预算。
+- WebVPN 省略学校会话 Cookie 时只保留网关认证 Cookie；自动选课提交、课程字段、会话锁和 2000 次未知响应保护均未改变。
+- 审查、补强并合入 [PR #12](https://github.com/Weeye-hua/SZU-Course-Help/pull/12)，新增登录请求头和连续异常边界回归测试。
+
 ### v3.6.2 Release 更新
 
 - 修复自动重新登录获取验证码时继承过期 Cookie 的回归；验证码 token 和图片请求现在完全省略 `Cookie` 请求头，学校可重新下发有效路由 Cookie。

@@ -2,31 +2,34 @@
 
 本版本提供 Windows、macOS 和 Linux 原生发布包。普通用户请下载与自己系统匹配的 ZIP，不要下载 GitHub 自动附带的 Source code 压缩包。
 
-## v3.6.2 更新说明
+## v3.6.3 更新说明
 
-1. 修复 v3.6.1 自动重新登录获取验证码时继承过期学校 Cookie 的回归。验证码 token 与图片请求现在完全省略 `Cookie` 请求头，让学校重新下发有效的 `route` 与 `insert_cookie`。
-2. 无 Cookie 规则同时覆盖手动登录验证码、旧 OCR 路径和当前自动重登录路径；登录提交、课程查询、抢课请求和 WebVPN 的 Cookie 行为保持不变。
-3. 修复 Linux 打包版启动及“学校原始页面”无法拉起浏览器的问题。程序会正确识别 Nuitka 编译态，并从 Linux 外部子进程环境中过滤 OpenCV 导入产生的空库路径和发布目录条目，避免捆绑 OpenSSL 遮蔽系统库。
-4. Linux 浏览器入口使用无 shell 的 `xdg-open`，失败时回退 `gio open`；WebVPN 受控浏览器使用相同隔离环境，Windows 与 macOS 行为不变。
-5. “学校原始页面”改为浏览器真实链接，即使系统 opener 不可用也能直接访问；后端程序化入口仍保留固定公开 URL。
-6. Linux Release 构建新增真实产物冒烟测试，验证外部子进程环境不含空路径或发布目录，并确认 ddddocr、OpenCV 与 ONNX Runtime 仍能初始化。
-7. 保留 v3.6.1 的可配置失败阈值：爆发和一般模式均可填写 1 至 1,000,000 次或设为“无限次”，网络异常和学校 5xx 不计入业务失败。
-8. 单门课程连续未知响应的保护性暂停阈值由 200 次提高到 2000 次；中间收到一次可识别响应即清零，网络异常、阶段门控和会话恢复继续使用独立保护。
-9. 保留任务暂停后增删、重试、开关与优先级调整、安全停止、课表、学分统计、多校区目录和账号隔离缓存。
-10. OCR 自动重登录兼容 `ddddocr 1.6.1` 多种 API；CI 覆盖 Python 3.13/3.14，各平台构建前均真实初始化 OCR。
-11. Release 运行数据继续位于系统用户目录，升级后沿用原有清单、Card Key 身份和安全课程缓存。
-12. 学校密码只保存在当前进程内存中；WebVPN 只用于认证后的只读查询，选课提交固定使用学校主站，本版不提供自动退课。
-13. 自动测试全部使用假数据，不访问学校，也不执行选课或退课操作。
-14. Release 只提供各平台与源码 ZIP，不附带独立 `.sha256` 或 `SHA256SUMS.txt` 文件。
+1. 完成 Issue #9 的自动重登录 Cookie 收尾：登录 POST 只携带本轮验证码下发的 `route` 与 `insert_cookie`，不再拼接内存中已经过期的 `route`、`JSESSIONID` 等学校会话 Cookie。
+2. 验证码 token、图片和登录提交形成同一轮干净 Cookie 契约，避免重复 Cookie 名让学校端读取到旧值；手动首登和 OCR 自动重登使用相同规则。
+3. 验证码接口连续第 3 次返回缺失必要 Cookie、畸形 token 等结构性异常时会提前停止并给出明确提示；取得一次完整响应立即清零计数，普通 OCR 识别失败仍可使用最多 50 张验证码的预算。
+4. WebVPN 请求显式省略学校会话 Cookie 时仍保留独立的网关认证 Cookie；主站请求继续完全省略 Cookie，自动选课提交固定使用学校主站。
+5. 审查、补强并合入 PR #12，新增登录请求头、空 Cookie、省略语义、WebVPN 网关 Cookie 和连续异常重置等回归测试。
+6. 保留 v3.6.2 的验证码 token/图片无 Cookie 获取规则，学校可以为每轮验证码重新下发有效的 `route` 与 `insert_cookie`。
+7. 保留 Linux 打包版外部子进程环境净化：正确识别 Nuitka 编译态，并过滤 OpenCV 导入产生的空库路径和发布目录条目，避免捆绑 OpenSSL 遮蔽系统库。
+8. Linux 浏览器入口继续使用无 shell 的 `xdg-open`，失败时回退 `gio open`；WebVPN 受控浏览器使用相同隔离环境，Windows 与 macOS 行为不变。
+9. “学校原始页面”保持为浏览器真实链接；Linux Release 构建继续验证真实产物的子进程环境以及 ddddocr、OpenCV 与 ONNX Runtime 初始化。
+10. 爆发和一般模式的业务失败阈值均可填写 1 至 1,000,000 次或设为“无限次”，网络异常和学校 5xx 不计入业务失败。
+11. 单门课程连续未知响应的保护性暂停阈值保持为 2000 次；中间收到一次可识别响应即清零，网络异常、阶段门控和会话恢复使用独立保护。
+12. 保留任务暂停后增删、重试、开关与优先级调整、安全停止、课表、学分统计、多校区目录和账号隔离缓存。
+13. OCR 自动重登录兼容 `ddddocr 1.6.1` 多种 API；CI 覆盖 Python 3.13/3.14，各平台构建前均真实初始化 OCR。
+14. Release 运行数据继续位于系统用户目录，升级后沿用原有清单、Card Key 身份和安全课程缓存。
+15. 学校密码只保存在当前进程内存中；WebVPN 只用于认证后的只读查询，本版不提供自动退课。
+16. 自动测试全部使用假数据，不访问学校，也不执行选课或退课操作。
+17. Release 只提供各平台与源码 ZIP，不附带独立 `.sha256` 或 `SHA256SUMS.txt` 文件。
 
 | 系统 | 下载文件 | 启动方式 |
 | --- | --- | --- |
-| Windows 10/11 64 位 | `SZU-Course-Help-v3.6.2-windows-x64.zip` | 双击 `启动抢课助手.bat` |
-| Apple 芯片 Mac | `SZU-Course-Help-v3.6.2-macos-arm64.zip` | 双击 `启动抢课助手.command` |
-| Intel 芯片 Mac | `SZU-Course-Help-v3.6.2-macos-x64.zip` | 双击 `启动抢课助手.command` |
-| Linux 64 位 | `SZU-Course-Help-v3.6.2-linux-x64.zip` | 运行 `启动抢课助手.sh` |
+| Windows 10/11 64 位 | `SZU-Course-Help-v3.6.3-windows-x64.zip` | 双击 `启动抢课助手.bat` |
+| Apple 芯片 Mac | `SZU-Course-Help-v3.6.3-macos-arm64.zip` | 双击 `启动抢课助手.command` |
+| Intel 芯片 Mac | `SZU-Course-Help-v3.6.3-macos-x64.zip` | 双击 `启动抢课助手.command` |
+| Linux 64 位 | `SZU-Course-Help-v3.6.3-linux-x64.zip` | 运行 `启动抢课助手.sh` |
 
-每个发布包均含可执行程序、平台启动脚本、`使用手册.md`、`使用手册.pdf`、`更新记录.md`、项目说明和许可证。`SZU-Course-Help-v3.6.2-source.zip` 供开发者使用。
+每个发布包均含可执行程序、平台启动脚本、`使用手册.md`、`使用手册.pdf`、`更新记录.md`、项目说明和许可证。`SZU-Course-Help-v3.6.3-source.zip` 供开发者使用。
 
 ## 首次运行
 

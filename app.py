@@ -148,7 +148,7 @@ LOCAL_ORIGINS = (
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.6.2")
+app = FastAPI(title="深大抢课助手 API", version="3.6.3")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],

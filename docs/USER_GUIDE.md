@@ -1,4 +1,4 @@
-# 深大抢课助手 3.6.2 使用手册
+# 深大抢课助手 3.6.3 使用手册
 
 - 适用项目：SZU Course Help
 - 下载页面：https://github.com/Weeye-hua/SZU-Course-Help/releases/latest
@@ -10,10 +10,10 @@
 
 在最新 Release 的 Assets 中按系统下载：
 
-- Windows 10/11 64 位：`SZU-Course-Help-v3.6.2-windows-x64.zip`
-- macOS Apple 芯片：`SZU-Course-Help-v3.6.2-macos-arm64.zip`
-- macOS Intel 芯片：`SZU-Course-Help-v3.6.2-macos-x64.zip`
-- Linux 64 位：`SZU-Course-Help-v3.6.2-linux-x64.zip`
+- Windows 10/11 64 位：`SZU-Course-Help-v3.6.3-windows-x64.zip`
+- macOS Apple 芯片：`SZU-Course-Help-v3.6.3-macos-arm64.zip`
+- macOS Intel 芯片：`SZU-Course-Help-v3.6.3-macos-x64.zip`
+- Linux 64 位：`SZU-Course-Help-v3.6.3-linux-x64.zip`
 
 必须先完整解压 ZIP。不要在压缩包预览窗口中运行，也不要只拖出主程序，否则 OCR 模型和依赖文件可能缺失。普通用户不要下载 GitHub 自动生成的 Source code 压缩包。
 
@@ -151,9 +151,11 @@ Card Key 只在本机验证，不发送给学校。学校密码只保存在当�
 4. 原子更新 token、Cookie 与批次。
 5. 在工作台显示恢复状态，并继续未完成任务。
 
-每次恢复最多尝试 50 张验证码。学校明确关闭验证码接口时会立即停止，不会请求满 50 次。多个请求同时发现过期时，只运行一个 OCR 恢复；活动任务的保活也由单一会话管理器协调。
+每次恢复最多尝试 50 张验证码。学校明确关闭验证码接口时会立即停止，不会请求满 50 次。验证码接口若连续 3 次返回缺失必要 Cookie、畸形 token 等结构性异常，也会提前停止并提示手动登录；成功取得一次完整验证码响应会立即清零该计数，因此普通 OCR 识别失败仍保留完整的 50 次预算。多个请求同时发现过期时，只运行一个 OCR 恢复；活动任务的保活也由单一会话管理器协调。
 
-启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.6.2 兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
+自动重登录的验证码 token、图片和登录提交使用同一轮干净 Cookie：登录请求只携带本轮验证码下发的 `route` 与 `insert_cookie`，不会拼接已经过期的学校会话 Cookie。WebVPN 只读请求在省略学校会话 Cookie 时仍会保留独立的网关认证 Cookie。
+
+启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.6.3 兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
 
 ## 九、Release 数据目录和升级迁移
 
@@ -244,4 +246,4 @@ python -m pytest -q
 
 ---
 
-版本：3.6.2 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help
+版本：3.6.3 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help
