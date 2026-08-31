@@ -72,10 +72,54 @@ def key_dir() -> Path:
     return directory
 
 
+def external_process_env() -> dict[str, str]:
+    """Return a child-process environment copy that cannot shadow system libraries.
+
+    Nuitka standalone exports ``LD_LIBRARY_PATH`` (observed value ``":"`` on
+    CI builds). glibc resolves empty entries against the current working
+    directory, which the Linux launcher sets to the release folder holding
+    bundled ``libssl.so.3``/``libcrypto.so.3``; any child that loads system
+    OpenSSL/Qt/KIO libraries then aborts with missing ``OPENSSL_3.x``
+    version symbols. Only Linux packaged runs are affected — other platforms
+    and source checkouts get an untouched copy.
+
+    Entries are filtered with ``os.pathsep``: empty items, ``.``, and paths
+    resolving into the application directory are dropped; everything else
+    the user configured (vendor runtime dirs, preload helpers) is kept. The
+    variable is removed entirely when nothing survives. The function is
+    pure and idempotent, and never mutates the caller's mapping.
+    """
+    env = dict(os.environ)
+    if not (sys.platform.startswith("linux") and is_frozen()):
+        return env
+    application = Path(application_dir()).resolve()
+    for name in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        raw = env.get(name)
+        if raw is None:
+            continue
+        kept = []
+        for entry in raw.split(os.pathsep):
+            if not entry or entry == ".":
+                continue
+            try:
+                resolved = Path(entry).resolve()
+            except OSError:
+                continue
+            if resolved == application or application in resolved.parents:
+                continue
+            kept.append(entry)
+        if kept:
+            env[name] = os.pathsep.join(kept)
+        else:
+            env.pop(name, None)
+    return env
+
+
 __all__ = [
     "PROJECT_ROOT",
     "application_dir",
     "data_dir",
+    "external_process_env",
     "is_frozen",
     "key_dir",
     "resource_path",

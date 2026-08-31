@@ -1229,3 +1229,27 @@ def test_captcha_solve_returns_empty_when_ocr_fails(monkeypatch, tmp_path):
     body = response.json()
     assert body["points"] == []
     assert "OCR" in body["message"]
+
+
+def test_school_open_success_response_keeps_public_url(monkeypatch):
+    monkeypatch.setattr(app, "open_external_url", lambda url: True)
+
+    response = client.post("/api/school/open")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_error"] is False
+    assert body["url"] == app.OFFICIAL_SCHOOL_HOME_URL
+    assert body["message"] == "已请求系统浏览器打开学校官方选课页面"
+
+
+def test_school_open_failure_response_keeps_public_url(monkeypatch):
+    monkeypatch.setattr(app, "open_external_url", lambda url: False)
+
+    response = client.post("/api/school/open")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["is_error"] is True
+    assert body["error_code"] == "BROWSER_OPEN_FAILED"
+    assert body["url"] == app.OFFICIAL_SCHOOL_HOME_URL

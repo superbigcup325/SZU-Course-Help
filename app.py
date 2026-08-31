@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import socket
+import subprocess
+import sys
 import threading
 import webbrowser
 from contextlib import asynccontextmanager
@@ -31,7 +34,7 @@ from campus import (
 from card_key import verify_card_key
 from course_list import CatalogRequestContext
 from logging_config import configure_logging
-from project_paths import resource_path
+from project_paths import external_process_env, resource_path
 from services import backend_service, cart_service, webvpn_auth_service
 from services.auth_service import (
     LOGIN_ERROR_MSG,
@@ -1841,21 +1844,21 @@ def _safe_static_file(relative_path: str) -> Path | None:
 async def api_open_official_school_page():
     """Open the public school entry without exposing local session secrets."""
     try:
-        opened = await asyncio.to_thread(webbrowser.open_new_tab, OFFICIAL_SCHOOL_HOME_URL)
+        opened = await asyncio.to_thread(open_external_url, OFFICIAL_SCHOOL_HOME_URL)
     except Exception as exc:
         logger.warning("Unable to open official school page: %s", exc)
         opened = False
     if not opened:
         return _api_error(
             503,
-            "系统浏览器未能自动打开，请手动访问深圳大学本科选课系统",
+            "外部打开命令未能执行，请手动访问深圳大学本科选课系统",
             "BROWSER_OPEN_FAILED",
             retryable=True,
             url=OFFICIAL_SCHOOL_HOME_URL,
         )
     return JSONResponse(
         content={
-            "message": "已在系统浏览器打开学校官方选课页面",
+            "message": "已请求系统浏览器打开学校官方选课页面",
             "is_error": False,
             "url": OFFICIAL_SCHOOL_HOME_URL,
         },
@@ -1898,8 +1901,55 @@ async def serve_frontend(full_path: str):
     raise HTTPException(status_code=404, detail="前端文件未找到")
 
 
+def _external_opener_commands(url: str) -> list[list[str]]:
+    """Return Linux opener argv candidates in fallback order (no shell)."""
+    return [["xdg-open", url], ["gio", "open", url]]
+
+
+def open_external_url(url: str) -> bool:
+    """Open a public URL, isolating Linux children from bundled libraries.
+
+    Windows and macOS keep the stdlib browser lookup. On Linux the opener is
+    executed as an argv list — never a shell — with the sanitized environment
+    from :func:`project_paths.external_process_env`, so the bundled OpenSSL
+    copies in the release folder cannot shadow system libraries for
+    ``xdg-open``/``gio``/``kde-open``. A zero exit code only means the opener
+    command was created successfully; callers must still surface the URL.
+    """
+    if sys.platform in {"win32", "darwin"}:
+        try:
+            return bool(webbrowser.open_new_tab(url))
+        except Exception as exc:  # pragma: no cover - platform browser quirks
+            logger.warning("Unable to open %s via system browser: %s", url, exc)
+            return False
+    for command in _external_opener_commands(url):
+        executable = shutil.which(command[0])
+        if not executable:
+            continue
+        try:
+            completed = subprocess.run(
+                [executable, *command[1:]],
+                env=external_process_env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            logger.warning("External opener %s failed for %s: %s", command[0], url, exc)
+            continue
+        if completed.returncode == 0:
+            return True
+        logger.warning(
+            "External opener %s exited with %s for %s", command[0], completed.returncode, url
+        )
+    return False
+
+
 def open_browser() -> None:
-    webbrowser.open(get_login_url())
+    if not open_external_url(get_login_url()):
+        logger.warning("Unable to auto-open %s; please visit it manually", get_login_url())
 
 
 KEEP_ALIVE_INTERVAL_SECONDS = 60
