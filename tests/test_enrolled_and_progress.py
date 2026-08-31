@@ -387,6 +387,10 @@ def test_unknown_response_does_not_starve_other_courses(tmp_path, monkeypatch):
     assert db.get_courses_by_status(database.STATUS_SUCCESS)[0]["id"] == "B"
 
 
+def test_unknown_response_default_pause_threshold_is_two_thousand():
+    assert config.DEFAULT_UNKNOWN_RESPONSE_PAUSE_THRESHOLD == 2000
+
+
 def test_multi_course_one_succeeds_other_continues(tmp_path, monkeypatch):
     a = _course(id="A", name="A课")
     b = _course(id="B", name="B课")

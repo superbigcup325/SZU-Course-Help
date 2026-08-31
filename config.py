@@ -81,9 +81,10 @@ ocr_relogin_max_attempts: int = 50
 
 # 单门课程连续收到无法识别的学校返回时，达到该次数后保护性暂停。
 # 任意一次已知响应都会立即清零该课程的连续计数。
+DEFAULT_UNKNOWN_RESPONSE_PAUSE_THRESHOLD = 2000
 unknown_response_pause_threshold: int = _positive_env_int(
     "COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT",
-    200,
+    DEFAULT_UNKNOWN_RESPONSE_PAUSE_THRESHOLD,
 )
 
 # Full-catalog search pacing and scoped cache settings.
