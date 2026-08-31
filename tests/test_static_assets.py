@@ -306,3 +306,22 @@ def test_cart_auto_enroll_checkbox_reconciles_server_state():
     assert "saved.auto_enabled" in script
     assert "item.auto_enabled !== undefined" in script
     assert "current.autoEnabled = Boolean(item.auto_enabled)" in script
+
+
+def test_school_raw_entry_is_a_real_public_link():
+    """The fixed public school entry opens directly in the user's browser.
+
+    A real anchor always works — the workbench itself runs in a browser — so
+    the desktop opener chain (xdg-open → kde-open) cannot break this entry,
+    and the URL must stay in sync with app.OFFICIAL_SCHOOL_HOME_URL.
+    """
+    course = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+
+    assert 'id="openSchoolRaw"' in course
+    assert f'href="{app.OFFICIAL_SCHOOL_HOME_URL}"' in course
+    assert 'target="_blank"' in course
+    assert 'rel="noopener noreferrer"' in course
+    # The old backend-spawn path is gone from the frontend.
+    assert "openSchoolRawPage" not in script
+    assert "/api/school/open" not in script

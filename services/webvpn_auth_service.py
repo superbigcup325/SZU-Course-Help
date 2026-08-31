@@ -24,7 +24,6 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from project_paths import external_process_env
-
 from services import auth_service, backend_service
 
 logger = logging.getLogger(__name__)
