@@ -1,4 +1,4 @@
-# 深大抢课助手 3.6.0 使用手册
+# 深大抢课助手 3.6.1 使用手册
 
 - 适用项目：SZU Course Help
 - 下载页面：https://github.com/Weeye-hua/SZU-Course-Help/releases/latest
@@ -10,10 +10,10 @@
 
 在最新 Release 的 Assets 中按系统下载：
 
-- Windows 10/11 64 位：`SZU-Course-Help-v3.6.0-windows-x64.zip`
-- macOS Apple 芯片：`SZU-Course-Help-v3.6.0-macos-arm64.zip`
-- macOS Intel 芯片：`SZU-Course-Help-v3.6.0-macos-x64.zip`
-- Linux 64 位：`SZU-Course-Help-v3.6.0-linux-x64.zip`
+- Windows 10/11 64 位：`SZU-Course-Help-v3.6.1-windows-x64.zip`
+- macOS Apple 芯片：`SZU-Course-Help-v3.6.1-macos-arm64.zip`
+- macOS Intel 芯片：`SZU-Course-Help-v3.6.1-macos-x64.zip`
+- Linux 64 位：`SZU-Course-Help-v3.6.1-linux-x64.zip`
 
 必须先完整解压 ZIP。不要在压缩包预览窗口中运行，也不要只拖出主程序，否则 OCR 模型和依赖文件可能缺失。普通用户不要下载 GitHub 自动生成的 Source code 压缩包。
 
@@ -137,6 +137,8 @@ Card Key 只在本机验证，不发送给学校。学校密码只保存在当�
 - 移除最后一门活动课程会使任务有序结束。
 - “停止抢课”会结束当前任务但保留本地清单；之后重新启动仍需确认阶段。
 
+爆发模式转一般模式、一般模式转扫描模式的业务失败阈值可以分别设置为 1 至 1,000,000 次，默认值为 5 次和累计 10 次。勾选某一级的“无限次”后，该模式不会因业务失败自动降级；两个选项互不影响。设置在当前程序进程内即时生效，刷新页面仍会从后台恢复，重新启动程序后恢复默认值。网络异常和学校 5xx 响应继续使用独立保护逻辑，不计入业务失败阈值。
+
 未知学校响应按课程分别计数，默认连续 200 次才保护性暂停；中间收到任何已识别响应会清零该课程计数。可在启动前设置 `COURSE_SELECT_UNKNOWN_RESPONSE_LIMIT`，非法值、零或负数会回退到 200。不建议关闭保护。
 
 ## 八、会话过期与 OCR 自动重登录
@@ -151,7 +153,7 @@ Card Key 只在本机验证，不发送给学校。学校密码只保存在当�
 
 每次恢复最多尝试 50 张验证码。学校明确关闭验证码接口时会立即停止，不会请求满 50 次。多个请求同时发现过期时，只运行一个 OCR 恢复；活动任务的保活也由单一会话管理器协调。
 
-启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.6.0 兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
+启动时会真实初始化 OCR。若提示依赖不可用，手动首次登录仍可使用，但会话过期后需要手动登录。v3.6.1 兼容 `ddddocr 1.6.1` 的 `ddddocr.core`、顶层新引擎和旧 `DdddOcr` API；官方 Release 构建和 Python 3.13/3.14 CI 均执行初始化测试。
 
 ## 九、Release 数据目录和升级迁移
 
@@ -242,4 +244,4 @@ python -m pytest -q
 
 ---
 
-版本：3.6.0 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help
+版本：3.6.1 · 许可证：MIT License · https://github.com/Weeye-hua/SZU-Course-Help
