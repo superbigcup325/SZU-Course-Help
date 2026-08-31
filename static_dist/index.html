@@ -26,7 +26,15 @@
         <span class="cart-label-long">选课清单</span><span class="cart-label-short">清单</span>
         <span id="cartCount" class="count-badge">0</span>
       </button>
-      <button id="openSchoolRaw" class="button button-quiet" type="button">学校原始页面</button>
+      <!-- 固定公开入口：不含本地令牌或学校会话，浏览器直接打开即可，无需后端代启动。 -->
+      <a
+        id="openSchoolRaw"
+        class="button button-quiet"
+        href="http://bkxk.szu.edu.cn/xsxkapp/sys/xsxkapp/*default/index.do"
+        target="_blank"
+        rel="noopener noreferrer"
+        >学校原始页面</a
+      >
       <button id="logoutButton" class="button button-quiet" type="button">退出登录</button>
     </div>
   </header>
