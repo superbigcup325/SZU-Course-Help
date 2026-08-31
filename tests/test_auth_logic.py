@@ -558,7 +558,7 @@ def test_structural_captcha_failure_terminates_login_page_ocr_loop_early(monkeyp
     with pytest.raises(RuntimeError, match="结构性异常"):
         logic.verify_vcode_login_flow(max_attempts=50)
 
-    assert len(calls) == logic.STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE + 1
+    assert len(calls) == logic.STRUCTURAL_CAPTCHA_ABORT_AFTER
 
 
 def test_structural_captcha_failure_terminates_terminal_ocr_loop_early(monkeypatch):
@@ -576,7 +576,7 @@ def test_structural_captcha_failure_terminates_terminal_ocr_loop_early(monkeypat
     with pytest.raises(RuntimeError, match="结构性异常"):
         logic.verify_vcode(max_attempts=50)
 
-    assert len(calls) == logic.STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE + 1
+    assert len(calls) == logic.STRUCTURAL_CAPTCHA_ABORT_AFTER
 
 
 def test_non_structural_failure_resets_the_structural_captcha_counter(monkeypatch):
@@ -596,4 +596,25 @@ def test_non_structural_failure_resets_the_structural_captcha_counter(monkeypatc
     with pytest.raises(RuntimeError, match="结构性异常"):
         logic.verify_vcode(max_attempts=50)
 
-    assert len(calls) == 2 * logic.STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE + 1
+    assert len(calls) == 2 * logic.STRUCTURAL_CAPTCHA_ABORT_AFTER - 1
+
+
+def test_unsolved_captcha_resets_the_structural_failure_streak(monkeypatch):
+    monkeypatch.setattr(config, "student_id", "2024110122")
+    monkeypatch.setattr(config, "password", "secret")
+    calls = []
+
+    def captcha_sequence():
+        calls.append(1)
+        if len(calls) == 2:
+            return "vtoken", "route=fresh; insert_cookie=node"
+        raise logic.CaptchaResponseError("验证码图片响应缺少必要 Cookie")
+
+    monkeypatch.setattr(logic, "get_new_image", captcha_sequence)
+    monkeypatch.setattr(logic, "recognize_captcha_centers", lambda: [])
+    monkeypatch.setattr(logic.time, "sleep", lambda *_: None)
+
+    with pytest.raises(RuntimeError, match="结构性异常"):
+        logic.verify_vcode(max_attempts=50)
+
+    assert len(calls) == logic.STRUCTURAL_CAPTCHA_ABORT_AFTER + 2

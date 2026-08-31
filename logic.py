@@ -32,10 +32,10 @@ CAPTCHA_WIDTH = 250
 CAPTCHA_HEIGHT = 80
 OCR_RETRY_DELAY_SECONDS = 0.25
 # A structurally wrong captcha response (valid image but missing the required
-# Set-Cookie, malformed token payload) cannot succeed by repeating the
-# identical request, so the OCR loops cap consecutive contract failures
-# instead of burning the whole recognition budget (issue #9).
-STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE = 2
+# Set-Cookie, malformed token payload) should not burn the whole recognition
+# budget. Three fresh consecutive failures still allow a brief transient issue
+# to recover while stopping a changed school contract early (issue #9).
+STRUCTURAL_CAPTCHA_ABORT_AFTER = 3
 CAPTCHA_UNAVAILABLE_KEYWORDS = (
     "非选课时间",
     "不在选课时间",
@@ -133,6 +133,9 @@ def verify_vcode(
     for attempt in range(1, max_attempts + 1):
         try:
             vtoken, cookie = get_new_image()
+            # The school returned one complete captcha response. OCR failures
+            # after this point are a separate category and break the streak.
+            structural_failures = 0
             centers = recognize_captcha_centers()
             coordinates = serialize_captcha_coordinates(centers)
             if coordinates:
@@ -147,7 +150,7 @@ def verify_vcode(
         except CaptchaResponseError as exc:
             structural_failures += 1
             last_error = exc
-            if structural_failures > STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE:
+            if structural_failures >= STRUCTURAL_CAPTCHA_ABORT_AFTER:
                 logger.error("Captcha contract kept failing; stopping OCR retries: %s", exc)
                 raise RuntimeError(
                     f"验证码接口连续 {structural_failures} 次返回结构性异常，已提前终止: {exc}"
@@ -155,7 +158,7 @@ def verify_vcode(
             logger.warning(
                 "OCR captcha contract failure %s/%s: %s",
                 structural_failures,
-                STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE,
+                STRUCTURAL_CAPTCHA_ABORT_AFTER,
                 exc,
             )
         except Exception as exc:
@@ -198,6 +201,9 @@ def verify_vcode_login_flow(
     for attempt in range(1, max_attempts + 1):
         try:
             captcha = fetch_vtoken_and_image(1)
+            # A valid token/image/cookie tuple ends any preceding school
+            # response-contract streak, even when OCR cannot solve the image.
+            structural_failures = 0
             _header, encoded = str(captcha["imageUrl"]).split(",", 1)
             image_path = _captcha_image_path()
             image_path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +226,7 @@ def verify_vcode_login_flow(
         except CaptchaResponseError as exc:
             structural_failures += 1
             last_error = exc
-            if structural_failures > STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE:
+            if structural_failures >= STRUCTURAL_CAPTCHA_ABORT_AFTER:
                 logger.error("Captcha contract kept failing; stopping OCR retries: %s", exc)
                 raise RuntimeError(
                     f"验证码接口连续 {structural_failures} 次返回结构性异常，已提前终止: {exc}"
@@ -228,7 +234,7 @@ def verify_vcode_login_flow(
             logger.warning(
                 "Login-page captcha contract failure %s/%s: %s",
                 structural_failures,
-                STRUCTURAL_CAPTCHA_MAX_CONSECUTIVE,
+                STRUCTURAL_CAPTCHA_ABORT_AFTER,
                 exc,
             )
         except Exception as exc:
