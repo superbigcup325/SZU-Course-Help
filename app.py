@@ -94,7 +94,7 @@ from services.webvpn_auth_service import ControlledBrowserUnavailableError
 SERVER_HOST = "127.0.0.1"
 DEFAULT_SERVER_PORT = 8000
 RUNTIME_PORT_ENV = "COURSE_SELECT_RUNTIME_PORT"
-UI_ASSET_BUILD = "20260831.1"
+UI_ASSET_BUILD = "20260831.2"
 logger = logging.getLogger(__name__)
 OFFICIAL_SCHOOL_HOME_URL = f"{config.SCHOOL_BASE_URL}*default/index.do"
 
@@ -145,7 +145,7 @@ LOCAL_ORIGINS = (
 _runtime_prefill = {"student_id": "", "card_key": ""}
 
 
-app = FastAPI(title="深大抢课助手 API", version="3.6.0")
+app = FastAPI(title="深大抢课助手 API", version="3.6.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[],
@@ -301,6 +301,8 @@ class EnrollmentSettingsRequest(BaseModel):
     boost_interval_ms: int | None = Field(default=None, ge=0, le=300000)
     normal_interval_ms: int | None = Field(default=None, ge=0, le=300000)
     scan_interval_ms: int | None = Field(default=None, ge=0, le=300000)
+    boost_failure_limit: int | None = Field(default=None, ge=1, le=1_000_000, strict=True)
+    normal_failure_limit: int | None = Field(default=None, ge=1, le=1_000_000, strict=True)
     mode: str | None = Field(default=None, pattern=r"^(boost|normal|scan)$")
 
 
@@ -1628,8 +1630,11 @@ async def api_enroll_settings():
 
 @app.patch("/api/enroll/settings")
 async def api_update_enroll_settings(request: EnrollmentSettingsRequest):
-    values = request.model_dump(exclude_none=True)
+    values = request.model_dump(exclude_unset=True)
     mode = values.pop("mode", None)
+    for key in ("boost_interval_ms", "normal_interval_ms", "scan_interval_ms"):
+        if values.get(key) is None:
+            values.pop(key, None)
     try:
         settings = update_enroll_settings(**values)
         if mode:

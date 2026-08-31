@@ -125,6 +125,8 @@ def test_mode_endpoint_returns_complete_settings_snapshot(monkeypatch):
     monkeypatch.setitem(enroll_service._settings, "boost_interval_ms", 1200)
     monkeypatch.setitem(enroll_service._settings, "normal_interval_ms", 12300)
     monkeypatch.setitem(enroll_service._settings, "scan_interval_ms", 65000)
+    monkeypatch.setitem(enroll_service._settings, "boost_failure_limit", 7)
+    monkeypatch.setitem(enroll_service._settings, "normal_failure_limit", None)
 
     response = client.post("/api/enroll/mode", json={"mode": "normal"})
 
@@ -135,9 +137,38 @@ def test_mode_endpoint_returns_complete_settings_snapshot(monkeypatch):
         "boost_interval_ms": 1200,
         "normal_interval_ms": 12300,
         "scan_interval_ms": 65000,
+        "boost_failure_limit": 7,
+        "normal_failure_limit": None,
         "mode": "normal",
     }
     enroll_service._release_enroll_task()
+
+
+def test_failure_limit_api_accepts_finite_and_unlimited_values(monkeypatch):
+    monkeypatch.setitem(enroll_service._settings, "boost_failure_limit", 5)
+    monkeypatch.setitem(enroll_service._settings, "normal_failure_limit", 10)
+
+    response = client.patch(
+        "/api/enroll/settings",
+        json={"boost_failure_limit": 37, "normal_failure_limit": None},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["boost_failure_limit"] == 37
+    assert response.json()["normal_failure_limit"] is None
+    settings = client.get("/api/enroll/settings").json()
+    assert settings["boost_failure_limit"] == 37
+    assert settings["normal_failure_limit"] is None
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.5, "12", True, 1_000_001])
+def test_failure_limit_api_rejects_invalid_values(value):
+    response = client.patch(
+        "/api/enroll/settings",
+        json={"boost_failure_limit": value},
+    )
+
+    assert response.status_code == 422
 
 
 # ------------------------------------------------------------------
@@ -202,6 +233,8 @@ def test_enroll_defaults_and_business_failures_downgrade_modes(tmp_path, monkeyp
     assert enroll_service.get_enroll_settings()["boost_interval_ms"] == 1000
     assert enroll_service.get_enroll_settings()["normal_interval_ms"] == 10000
     assert enroll_service.get_enroll_settings()["scan_interval_ms"] == 60000
+    assert enroll_service.get_enroll_settings()["boost_failure_limit"] == 5
+    assert enroll_service.get_enroll_settings()["normal_failure_limit"] == 10
 
     assert enroll_service.reserve_enroll_task()
     try:
@@ -213,6 +246,81 @@ def test_enroll_defaults_and_business_failures_downgrade_modes(tmp_path, monkeyp
         assert enroll_service.get_enroll_task_state()["mode"] == "scan"
         row = db.get_courses_by_status(database.STATUS_IN_PROGRESS)[0]
         assert row["id"] == "mode1"
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_custom_failure_limits_control_each_mode_downgrade(tmp_path, monkeypatch):
+    course = _course(id="custom-mode", name="自定义阈值课程")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setitem(enroll_service._settings, "boost_failure_limit", 2)
+    monkeypatch.setitem(enroll_service._settings, "normal_failure_limit", 4)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("该课程超过课容量", code="0"),
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        monkeypatch.setattr(config, "count", 2)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "normal"
+
+        monkeypatch.setattr(config, "count", 2)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "scan"
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_unlimited_boost_failure_limit_never_auto_downgrades(tmp_path, monkeypatch):
+    course = _course(id="unlimited-boost", name="爆发无限阈值课程")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setitem(enroll_service._settings, "boost_failure_limit", None)
+    monkeypatch.setitem(enroll_service._settings, "normal_failure_limit", 10)
+    monkeypatch.setattr(config, "count", 25)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("该课程超过课容量", code="0"),
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "boost"
+        progress = enroll_service.get_enroll_progress()["courses"][0]
+        assert progress["failures"] == 25
+    finally:
+        enroll_service._release_enroll_task()
+
+
+def test_unlimited_normal_failure_limit_never_auto_downgrades(tmp_path, monkeypatch):
+    course = _course(id="unlimited-normal", name="一般无限阈值课程")
+    _prime_cart(monkeypatch, tmp_path, [course])
+    monkeypatch.setitem(enroll_service._settings, "boost_failure_limit", 2)
+    monkeypatch.setitem(enroll_service._settings, "normal_failure_limit", None)
+    monkeypatch.setattr(
+        enroll_service.choose_course,
+        "submit_course_selection",
+        lambda *_args: Resp("该课程超过课容量", code="0"),
+    )
+
+    assert enroll_service.reserve_enroll_task()
+    try:
+        enroll_service._reset_progress([course])
+        monkeypatch.setattr(config, "count", 2)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "normal"
+
+        monkeypatch.setattr(config, "count", 25)
+        assert enroll_service.grab_courses([course]) == enroll_service.GrabOutcome.CONTINUE
+        assert enroll_service.get_enroll_task_state()["mode"] == "normal"
+        progress = enroll_service.get_enroll_progress()["courses"][0]
+        assert progress["failures"] == 27
     finally:
         enroll_service._release_enroll_task()
 

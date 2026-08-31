@@ -282,6 +282,24 @@ def test_enrollment_interval_ui_uses_seconds_and_api_uses_milliseconds():
     assert 'id="scanInterval"' in index and 'value="60"' in index
 
 
+def test_enrollment_failure_limits_support_finite_and_unlimited_values():
+    script = (STATIC / "course-app.js").read_text(encoding="utf-8")
+    index = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="boostFailureLimit"' in index and 'value="5"' in index
+    assert 'id="normalFailureLimit"' in index and 'value="10"' in index
+    assert 'id="boostFailureUnlimited" type="checkbox" aria-label="爆发模式失败次数无限"' in index
+    assert 'id="normalFailureUnlimited" type="checkbox" aria-label="一般模式失败次数无限"' in index
+    assert "boost_failure_limit: failureLimitFromInputs" in script
+    assert "normal_failure_limit: failureLimitFromInputs" in script
+    assert "source.boost_failure_limit === null" in script
+    assert "source.normal_failure_limit === null" in script
+    assert "function failureDowngradeHint" in script
+    assert "不自动降为${targetName}模式" in script
+    assert 'failureDowngradeHint("爆发"' in script
+    assert 'failureDowngradeHint("一般"' in script
+
+
 def test_cart_auto_enroll_checkbox_reconciles_server_state():
     script = (STATIC / "course-app.js").read_text(encoding="utf-8")
 

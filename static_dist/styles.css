@@ -1960,6 +1960,35 @@ dialog::backdrop {
   width: 110px;
 }
 
+.threshold-input-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.setting-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.setting-checkbox input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+
+.threshold-input-row input:disabled {
+  color: var(--muted);
+  background: var(--surface-soft);
+  cursor: not-allowed;
+}
+
 @media (max-width: 640px) {
   .enroll-controls {
     padding: 16px;
@@ -1978,6 +2007,16 @@ dialog::backdrop {
   .setting-field,
   .setting-field input[type="number"] {
     width: 100%;
+  }
+
+  .threshold-input-row {
+    width: 100%;
+  }
+
+  .threshold-input-row input[type="number"] {
+    width: auto;
+    min-width: 0;
+    flex: 1;
   }
 }
 

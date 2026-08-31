@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>抢课工作台 | 深大抢课助手</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/styles.css?build=20260831.1">
+  <link rel="stylesheet" href="/styles.css?build=20260831.2">
 </head>
 <body class="app-page">
   <header class="topbar">
@@ -163,7 +163,30 @@
             <input id="scanInterval" type="number" min="1" step="1" value="60" inputmode="numeric">
           </label>
         </div>
-        <p class="settings-note">优先级只控制尝试顺序；助手不会自动退选任何已选课程。</p>
+        <div class="risk-settings" aria-label="自动降级设置">
+          <span class="control-label">自动降级</span>
+          <div class="setting-field threshold-field">
+            <label for="boostFailureLimit">爆发 → 一般失败次数</label>
+            <div class="threshold-input-row">
+              <input id="boostFailureLimit" type="number" min="1" max="1000000" step="1" value="5" inputmode="numeric" required>
+              <label class="setting-checkbox" for="boostFailureUnlimited">
+                <input id="boostFailureUnlimited" type="checkbox" aria-label="爆发模式失败次数无限">
+                <span>无限次</span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-field threshold-field">
+            <label for="normalFailureLimit">一般 → 扫描失败次数</label>
+            <div class="threshold-input-row">
+              <input id="normalFailureLimit" type="number" min="1" max="1000000" step="1" value="10" inputmode="numeric" required>
+              <label class="setting-checkbox" for="normalFailureUnlimited">
+                <input id="normalFailureUnlimited" type="checkbox" aria-label="一般模式失败次数无限">
+                <span>无限次</span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <p class="settings-note">“无限次”表示该模式不会因业务失败自动降级；网络异常和 5xx 不计入失败次数。优先级只控制尝试顺序，助手不会自动退选任何已选课程。</p>
       </section>
       <div id="cartList" class="cart-list"></div>
       <section id="enrollProgress" class="enroll-progress" hidden>
@@ -275,7 +298,7 @@
   </dialog>
 
   <div id="toastRegion" class="toast-region" aria-live="polite" aria-atomic="true"></div>
-  <script src="/schedule-parser.js?build=20260831.1" defer></script>
-  <script src="/course-app.js?build=20260831.1" defer></script>
+  <script src="/schedule-parser.js?build=20260831.2" defer></script>
+  <script src="/course-app.js?build=20260831.2" defer></script>
 </body>
 </html>

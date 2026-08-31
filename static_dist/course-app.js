@@ -78,6 +78,8 @@ const appState = {
     boostIntervalMs: 1000,
     normalIntervalMs: 10000,
     scanIntervalMs: 60000,
+    boostFailureLimit: 5,
+    normalFailureLimit: 10,
   },
   myCoursesView: "grid",
   showCartOnSchedule: true,
@@ -167,6 +169,10 @@ const appElements = {
   boostInterval: document.querySelector("#boostInterval"),
   normalInterval: document.querySelector("#normalInterval"),
   scanInterval: document.querySelector("#scanInterval"),
+  boostFailureLimit: document.querySelector("#boostFailureLimit"),
+  boostFailureUnlimited: document.querySelector("#boostFailureUnlimited"),
+  normalFailureLimit: document.querySelector("#normalFailureLimit"),
+  normalFailureUnlimited: document.querySelector("#normalFailureUnlimited"),
 };
 
 class ApiError extends Error {
@@ -313,11 +319,60 @@ function intervalMillisecondsToSeconds(value, fallbackMilliseconds) {
   return Math.max(0, Math.round(milliseconds / 1000));
 }
 
+function failureLimitFromInputs(input, unlimitedCheckbox, label) {
+  if (unlimitedCheckbox?.checked) return null;
+  const raw = String(input?.value ?? "").trim();
+  const value = Number(raw);
+  if (!raw || !Number.isInteger(value) || value < 1 || value > 1000000) {
+    throw new Error(`${label}必须是 1–1,000,000 的整数，或勾选“无限次”。`);
+  }
+  return value;
+}
+
+function syncFailureLimitControl(input, unlimitedCheckbox, limit, fallback) {
+  const unlimited = limit === null;
+  if (unlimitedCheckbox) unlimitedCheckbox.checked = unlimited;
+  if (!input) return;
+  input.disabled = unlimited;
+  if (!unlimited) input.value = String(limit);
+  else if (!String(input.value || "").trim()) input.value = String(fallback);
+}
+
+function syncFailureLimitControls() {
+  syncFailureLimitControl(
+    appElements.boostFailureLimit,
+    appElements.boostFailureUnlimited,
+    appState.enroll.boostFailureLimit,
+    5,
+  );
+  syncFailureLimitControl(
+    appElements.normalFailureLimit,
+    appElements.normalFailureUnlimited,
+    appState.enroll.normalFailureLimit,
+    10,
+  );
+}
+
+function failureDowngradeHint(modeName, limit, targetName) {
+  if (limit === null) return `${modeName}模式不自动降为${targetName}模式`;
+  return `${modeName}模式业务失败 ${limit} 次降为${targetName}模式`;
+}
+
 function settingPayload() {
   return {
     boost_interval_ms: intervalSecondsToMilliseconds(appElements.boostInterval?.value, appState.enroll.boostIntervalMs),
     normal_interval_ms: intervalSecondsToMilliseconds(appElements.normalInterval?.value, appState.enroll.normalIntervalMs),
     scan_interval_ms: intervalSecondsToMilliseconds(appElements.scanInterval?.value, appState.enroll.scanIntervalMs),
+    boost_failure_limit: failureLimitFromInputs(
+      appElements.boostFailureLimit,
+      appElements.boostFailureUnlimited,
+      "爆发模式失败次数",
+    ),
+    normal_failure_limit: failureLimitFromInputs(
+      appElements.normalFailureLimit,
+      appElements.normalFailureUnlimited,
+      "一般模式失败次数",
+    ),
   };
 }
 
@@ -330,9 +385,20 @@ function applyEnrollSettings(data = {}) {
   appState.enroll.boostIntervalMs = numericValue(source.boost_interval_ms, appState.enroll.boostIntervalMs);
   appState.enroll.normalIntervalMs = numericValue(source.normal_interval_ms, appState.enroll.normalIntervalMs);
   appState.enroll.scanIntervalMs = numericValue(source.scan_interval_ms, appState.enroll.scanIntervalMs);
+  if (Object.prototype.hasOwnProperty.call(source, "boost_failure_limit")) {
+    appState.enroll.boostFailureLimit = source.boost_failure_limit === null
+      ? null
+      : numericValue(source.boost_failure_limit, appState.enroll.boostFailureLimit);
+  }
+  if (Object.prototype.hasOwnProperty.call(source, "normal_failure_limit")) {
+    appState.enroll.normalFailureLimit = source.normal_failure_limit === null
+      ? null
+      : numericValue(source.normal_failure_limit, appState.enroll.normalFailureLimit);
+  }
   if (appElements.boostInterval) appElements.boostInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.boostIntervalMs, 1000));
   if (appElements.normalInterval) appElements.normalInterval.value = String(intervalMillisecondsToSeconds(appState.enroll.normalIntervalMs, 10000));
   if (appElements.scanInterval) appElements.scanInterval.value = String(Math.max(1, intervalMillisecondsToSeconds(appState.enroll.scanIntervalMs, 60000)));
+  syncFailureLimitControls();
   renderEnrollControls();
 }
 
@@ -368,7 +434,7 @@ function renderEnrollControls() {
   if (appElements.enrollControlHint) {
     appElements.enrollControlHint.textContent = paused
       ? "任务已暂停，恢复后会保留当前课程进度和失败次数。"
-      : "爆发模式业务失败 5 次降为一般模式，一般模式失败 10 次降为扫描模式；网络异常和 5xx 不计失败。";
+      : `${failureDowngradeHint("爆发", appState.enroll.boostFailureLimit, "一般")}；${failureDowngradeHint("一般", appState.enroll.normalFailureLimit, "扫描")}；网络异常和 5xx 不计失败。`;
   }
   if (appElements.pauseEnroll) appElements.pauseEnroll.disabled = !running || paused;
   if (appElements.resumeEnroll) appElements.resumeEnroll.disabled = !running || !paused;
@@ -387,6 +453,8 @@ async function updateEnrollMode(mode) {
     boostIntervalMs: appState.enroll.boostIntervalMs,
     normalIntervalMs: appState.enroll.normalIntervalMs,
     scanIntervalMs: appState.enroll.scanIntervalMs,
+    boostFailureLimit: appState.enroll.boostFailureLimit,
+    normalFailureLimit: appState.enroll.normalFailureLimit,
   };
   appState.enroll.mode = mode;
   renderEnrollControls();
@@ -404,6 +472,12 @@ async function updateEnrollMode(mode) {
       boost_interval_ms: data.settings?.boost_interval_ms ?? previousSettings.boostIntervalMs,
       normal_interval_ms: data.settings?.normal_interval_ms ?? previousSettings.normalIntervalMs,
       scan_interval_ms: data.settings?.scan_interval_ms ?? previousSettings.scanIntervalMs,
+      boost_failure_limit: Object.prototype.hasOwnProperty.call(data.settings || {}, "boost_failure_limit")
+        ? data.settings.boost_failure_limit
+        : previousSettings.boostFailureLimit,
+      normal_failure_limit: Object.prototype.hasOwnProperty.call(data.settings || {}, "normal_failure_limit")
+        ? data.settings.normal_failure_limit
+        : previousSettings.normalFailureLimit,
     });
     showToast(`已切换为${enrollModeNames[mode]}`, false, true);
   } catch (error) {
@@ -427,8 +501,8 @@ async function toggleEnrollPause(paused) {
 }
 
 async function saveEnrollSettings() {
-  const payload = settingPayload();
   try {
+    const payload = settingPayload();
     const data = await planApi("/api/enroll/settings", {
       method: "PATCH",
       body: JSON.stringify(payload),
@@ -436,6 +510,7 @@ async function saveEnrollSettings() {
     applyEnrollSettings(data);
     showToast("抢课设置已保存", false, true);
   } catch (error) {
+    syncFailureLimitControls();
     showToast(planErrorMessage(error), true);
   }
 }
@@ -2933,6 +3008,16 @@ for (const button of appElements.modeButtons || []) {
 }
 for (const input of [appElements.boostInterval, appElements.normalInterval, appElements.scanInterval]) {
   input?.addEventListener("change", saveEnrollSettings);
+}
+for (const [input, checkbox] of [
+  [appElements.boostFailureLimit, appElements.boostFailureUnlimited],
+  [appElements.normalFailureLimit, appElements.normalFailureUnlimited],
+]) {
+  input?.addEventListener("change", saveEnrollSettings);
+  checkbox?.addEventListener("change", () => {
+    if (input) input.disabled = checkbox.checked;
+    saveEnrollSettings();
+  });
 }
 appElements.campusSelect.addEventListener("change", () => {
   switchCampus(appElements.campusSelect.value);

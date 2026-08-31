@@ -55,7 +55,10 @@ _settings = {
     "boost_interval_ms": 1000,
     "normal_interval_ms": 10000,
     "scan_interval_ms": 60000,
+    "boost_failure_limit": 5,
+    "normal_failure_limit": 10,
 }
+MAX_MODE_FAILURE_LIMIT = 1_000_000
 _business_failure_counts: dict[str, int] = {}
 _unknown_streak_counts: dict[str, int] = {}
 _network_streak_counts: dict[str, int] = {}
@@ -557,6 +560,16 @@ def update_enroll_settings(**values) -> dict:
         for key in ("boost_interval_ms", "normal_interval_ms", "scan_interval_ms"):
             if key in values:
                 _settings[key] = max(0, min(300000, int(values[key])))
+        for key in ("boost_failure_limit", "normal_failure_limit"):
+            if key not in values:
+                continue
+            value = values[key]
+            if value is None:
+                _settings[key] = None
+                continue
+            if isinstance(value, bool):
+                raise ValueError("failure limit must be an integer or null")
+            _settings[key] = max(1, min(MAX_MODE_FAILURE_LIMIT, int(value)))
         return get_enroll_settings()
 
 
@@ -565,6 +578,15 @@ def _mode_interval_seconds(mode: str) -> float:
     if int(getattr(config, "delay", 1) or 0) == 0:
         return 0.0
     return max(0, int(_settings[f"{mode}_interval_ms"])) / 1000.0
+
+
+def _mode_failure_limit(mode: str) -> int | None:
+    """Return the automatic downgrade threshold, or ``None`` when disabled."""
+    if mode not in {"boost", "normal"}:
+        return None
+    with _task_state_lock:
+        value = _settings[f"{mode}_failure_limit"]
+    return None if value is None else max(1, int(value))
 
 
 def _wait_until_resumed() -> bool:
@@ -1015,21 +1037,28 @@ def grab_courses(courses: list) -> GrabOutcome:
                         ),
                     )
                     current_mode = get_enroll_task_state()["mode"]
+                    failure_limit = _mode_failure_limit(current_mode)
                     if (
                         get_enroll_task_state()["running"]
                         and current_mode == "boost"
-                        and business_failures[course.id] >= 5
+                        and failure_limit is not None
+                        and business_failures[course.id] >= failure_limit
                     ):
                         set_enroll_mode("normal")
-                        _add_event("warn", f"{course.name} boost 业务失败达到 5 次，降为一般模式")
+                        _add_event(
+                            "warn",
+                            f"{course.name} boost 业务失败达到 {failure_limit} 次，降为一般模式",
+                        )
                     elif (
                         get_enroll_task_state()["running"]
                         and current_mode == "normal"
-                        and business_failures[course.id] >= 10
+                        and failure_limit is not None
+                        and business_failures[course.id] >= failure_limit
                     ):
                         set_enroll_mode("scan")
                         _add_event(
-                            "warn", f"{course.name} 一般模式业务失败达到 10 次，降为扫描模式"
+                            "warn",
+                            f"{course.name} 一般模式业务失败达到 {failure_limit} 次，降为扫描模式",
                         )
                     if not _wait_between_requests(
                         _mode_interval_seconds(get_enroll_task_state()["mode"])
